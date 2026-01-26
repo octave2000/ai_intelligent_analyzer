@@ -1,0 +1,56 @@
+import os
+
+
+def _get_int(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
+
+def _get_float(name: str, default: float) -> float:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        return default
+
+
+def _get_ffmpeg_mode() -> str:
+    raw = os.getenv("USE_FFMPEG", "auto").strip().lower()
+    if raw in ("1", "true", "yes", "force", "on"):
+        return "force"
+    if raw in ("0", "false", "no", "disable", "off"):
+        return "disable"
+    return "auto"
+
+
+class Settings:
+    frame_width: int
+    frame_height: int
+    target_fps: int
+    stale_threshold_seconds: float
+    backoff_min_seconds: float
+    backoff_max_seconds: float
+    read_timeout_seconds: float
+    use_ffmpeg: str
+    storage_path: str
+
+    def __init__(self) -> None:
+        self.frame_width = _get_int("FRAME_WIDTH", 640)
+        self.frame_height = _get_int("FRAME_HEIGHT", 360)
+        self.target_fps = _get_int("TARGET_FPS", 5)
+        self.stale_threshold_seconds = _get_float("STALE_THRESHOLD_SECONDS", 2.5)
+        self.backoff_min_seconds = _get_float("BACKOFF_MIN_SECONDS", 1.0)
+        self.backoff_max_seconds = _get_float("BACKOFF_MAX_SECONDS", 30.0)
+        self.read_timeout_seconds = _get_float("READ_TIMEOUT_SECONDS", 10.0)
+        self.use_ffmpeg = _get_ffmpeg_mode()
+        self.storage_path = os.getenv("STORAGE_PATH", "data/rooms.json")
+
+
+settings = Settings()
