@@ -5,6 +5,7 @@ from fastapi import APIRouter, HTTPException, Response
 from pydantic import BaseModel, Field
 
 from app.motion_gate import MotionGateManager
+from app.perception_manager import PerceptionManager
 from app.stream_manager import StreamManager
 
 
@@ -15,7 +16,9 @@ def _encode_jpeg(frame: "cv2.typing.MatLike") -> Optional[bytes]:
     return encoded.tobytes()
 
 
-def build_router(manager: StreamManager, gate: MotionGateManager) -> APIRouter:
+def build_router(
+    manager: StreamManager, gate: MotionGateManager, perception: PerceptionManager
+) -> APIRouter:
     router = APIRouter()
 
     class RoomCreate(BaseModel):
@@ -45,6 +48,7 @@ def build_router(manager: StreamManager, gate: MotionGateManager) -> APIRouter:
         if not removed:
             raise HTTPException(status_code=404, detail="Room not found")
         gate.remove_room(room_id)
+        perception.remove_room(room_id)
         return {"room_id": room_id, "removed": True}
 
     @router.post("/rooms/{room_id}/cameras")
@@ -55,6 +59,7 @@ def build_router(manager: StreamManager, gate: MotionGateManager) -> APIRouter:
         if not added:
             raise HTTPException(status_code=404, detail="Room not found or camera exists")
         gate.add_camera(room_id, payload.camera_id, payload.role)
+        perception.add_camera(room_id, payload.camera_id)
         return {"room_id": room_id, "camera_id": payload.camera_id, "added": True}
 
     @router.delete("/rooms/{room_id}/cameras/{camera_id}")
@@ -63,6 +68,7 @@ def build_router(manager: StreamManager, gate: MotionGateManager) -> APIRouter:
         if not removed:
             raise HTTPException(status_code=404, detail="Room or camera not found")
         gate.remove_camera(room_id, camera_id)
+        perception.remove_camera(room_id, camera_id)
         return {"room_id": room_id, "camera_id": camera_id, "removed": True}
 
     @router.get("/rooms/{room_id}/health")
@@ -99,5 +105,18 @@ def build_router(manager: StreamManager, gate: MotionGateManager) -> APIRouter:
     @router.get("/activity")
     def all_activity() -> dict:
         return gate.all_activity()
+
+    @router.get("/perception/events")
+    def perception_events(
+        limit: int = 200,
+        since: Optional[float] = None,
+        room_id: Optional[str] = None,
+        camera_id: Optional[str] = None,
+    ) -> dict:
+        return {
+            "events": perception.get_events(
+                limit=limit, since=since, room_id=room_id, camera_id=camera_id
+            )
+        }
 
     return router

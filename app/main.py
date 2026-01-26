@@ -3,6 +3,7 @@ from fastapi import FastAPI
 from app.api import build_router
 from app.config import settings
 from app.motion_gate import MotionGateManager
+from app.perception_manager import PerceptionManager
 from app.stream_manager import StreamManager
 
 
@@ -33,16 +34,46 @@ def create_app() -> FastAPI:
         downsample_height=settings.gate_downsample_height,
     )
     gate.bootstrap_from_stream_manager()
+    perception = PerceptionManager(
+        stream_manager=manager,
+        gate=gate,
+        active_interval_seconds=settings.perception_active_interval_seconds,
+        spike_interval_seconds=settings.perception_spike_interval_seconds,
+        spike_burst_seconds=settings.perception_spike_burst_seconds,
+        stale_seconds=settings.perception_stale_seconds,
+        track_ttl_seconds=settings.perception_track_ttl_seconds,
+        object_ttl_seconds=settings.perception_object_ttl_seconds,
+        object_persist_frames=settings.perception_object_persist_frames,
+        person_iou_threshold=settings.perception_person_iou_threshold,
+        object_iou_threshold=settings.perception_object_iou_threshold,
+        global_similarity_threshold=settings.perception_global_similarity_threshold,
+        global_max_age_seconds=settings.perception_global_max_age_seconds,
+        uniform_hsv_low=settings.perception_uniform_hsv_low,
+        uniform_hsv_high=settings.perception_uniform_hsv_high,
+        uniform_min_ratio=settings.perception_uniform_min_ratio,
+        teacher_height_ratio=settings.perception_teacher_height_ratio,
+        orientation_motion_threshold=settings.perception_orientation_motion_threshold,
+        proximity_distance_ratio=settings.perception_proximity_distance_ratio,
+        proximity_duration_seconds=settings.perception_proximity_duration_seconds,
+        group_distance_ratio=settings.perception_group_distance_ratio,
+        group_duration_seconds=settings.perception_group_duration_seconds,
+        detection_width=settings.perception_detection_width,
+        detection_height=settings.perception_detection_height,
+        exam_mode=settings.perception_exam_mode,
+    )
+    perception.bootstrap_from_stream_manager()
 
     @app.on_event("startup")
     def _startup() -> None:
         manager.start()
+        perception.start()
 
     @app.on_event("shutdown")
     def _shutdown() -> None:
         manager.stop()
+        perception.stop()
 
-    app.include_router(build_router(manager, gate))
+    app.include_router(build_router(manager, gate, perception))
     return app
 
 

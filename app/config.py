@@ -30,6 +30,26 @@ def _get_ffmpeg_mode() -> str:
     return "auto"
 
 
+def _get_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in ("1", "true", "yes", "on")
+
+
+def _get_int_tuple(name: str, default: tuple) -> tuple:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    parts = [p.strip() for p in raw.split(",") if p.strip()]
+    if len(parts) != 3:
+        return default
+    try:
+        return (int(parts[0]), int(parts[1]), int(parts[2]))
+    except ValueError:
+        return default
+
+
 class Settings:
     frame_width: int
     frame_height: int
@@ -50,6 +70,29 @@ class Settings:
     gate_stale_seconds: float
     gate_downsample_width: int
     gate_downsample_height: int
+    perception_active_interval_seconds: float
+    perception_spike_interval_seconds: float
+    perception_spike_burst_seconds: float
+    perception_stale_seconds: float
+    perception_track_ttl_seconds: float
+    perception_object_ttl_seconds: float
+    perception_object_persist_frames: int
+    perception_person_iou_threshold: float
+    perception_object_iou_threshold: float
+    perception_global_similarity_threshold: float
+    perception_global_max_age_seconds: float
+    perception_uniform_hsv_low: tuple
+    perception_uniform_hsv_high: tuple
+    perception_uniform_min_ratio: float
+    perception_teacher_height_ratio: float
+    perception_orientation_motion_threshold: float
+    perception_proximity_distance_ratio: float
+    perception_proximity_duration_seconds: float
+    perception_group_distance_ratio: float
+    perception_group_duration_seconds: float
+    perception_detection_width: int
+    perception_detection_height: int
+    perception_exam_mode: bool
 
     def __init__(self) -> None:
         self.frame_width = _get_int("FRAME_WIDTH", 640)
@@ -75,6 +118,63 @@ class Settings:
         self.gate_stale_seconds = _get_float("GATE_STALE_SECONDS", 2.5)
         self.gate_downsample_width = _get_int("GATE_DOWNSAMPLE_WIDTH", 64)
         self.gate_downsample_height = _get_int("GATE_DOWNSAMPLE_HEIGHT", 36)
+        self.perception_active_interval_seconds = _get_float(
+            "PERCEPTION_ACTIVE_INTERVAL_SECONDS", 2.0
+        )
+        self.perception_spike_interval_seconds = _get_float(
+            "PERCEPTION_SPIKE_INTERVAL_SECONDS", 0.5
+        )
+        self.perception_spike_burst_seconds = _get_float(
+            "PERCEPTION_SPIKE_BURST_SECONDS", 3.0
+        )
+        self.perception_stale_seconds = _get_float("PERCEPTION_STALE_SECONDS", 2.5)
+        self.perception_track_ttl_seconds = _get_float("PERCEPTION_TRACK_TTL_SECONDS", 2.5)
+        self.perception_object_ttl_seconds = _get_float("PERCEPTION_OBJECT_TTL_SECONDS", 3.0)
+        self.perception_object_persist_frames = _get_int(
+            "PERCEPTION_OBJECT_PERSIST_FRAMES", 2
+        )
+        self.perception_person_iou_threshold = _get_float(
+            "PERCEPTION_PERSON_IOU_THRESHOLD", 0.2
+        )
+        self.perception_object_iou_threshold = _get_float(
+            "PERCEPTION_OBJECT_IOU_THRESHOLD", 0.15
+        )
+        self.perception_global_similarity_threshold = _get_float(
+            "PERCEPTION_GLOBAL_SIMILARITY_THRESHOLD", 0.85
+        )
+        self.perception_global_max_age_seconds = _get_float(
+            "PERCEPTION_GLOBAL_MAX_AGE_SECONDS", 10.0
+        )
+        self.perception_uniform_hsv_low = _get_int_tuple(
+            "PERCEPTION_UNIFORM_HSV_LOW", (0, 0, 0)
+        )
+        self.perception_uniform_hsv_high = _get_int_tuple(
+            "PERCEPTION_UNIFORM_HSV_HIGH", (179, 255, 255)
+        )
+        self.perception_uniform_min_ratio = _get_float(
+            "PERCEPTION_UNIFORM_MIN_RATIO", 1.1
+        )
+        self.perception_teacher_height_ratio = _get_float(
+            "PERCEPTION_TEACHER_HEIGHT_RATIO", 0.6
+        )
+        self.perception_orientation_motion_threshold = _get_float(
+            "PERCEPTION_ORIENTATION_MOTION_THRESHOLD", 10.0
+        )
+        self.perception_proximity_distance_ratio = _get_float(
+            "PERCEPTION_PROXIMITY_DISTANCE_RATIO", 0.15
+        )
+        self.perception_proximity_duration_seconds = _get_float(
+            "PERCEPTION_PROXIMITY_DURATION_SECONDS", 2.0
+        )
+        self.perception_group_distance_ratio = _get_float(
+            "PERCEPTION_GROUP_DISTANCE_RATIO", 0.2
+        )
+        self.perception_group_duration_seconds = _get_float(
+            "PERCEPTION_GROUP_DURATION_SECONDS", 3.0
+        )
+        self.perception_detection_width = _get_int("PERCEPTION_DETECTION_WIDTH", 640)
+        self.perception_detection_height = _get_int("PERCEPTION_DETECTION_HEIGHT", 360)
+        self.perception_exam_mode = _get_bool("EXAM_MODE", False)
 
 
 settings = Settings()
