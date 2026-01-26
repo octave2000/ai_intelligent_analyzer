@@ -2,11 +2,19 @@ import json
 import os
 import threading
 import time
+from dataclasses import dataclass
 from typing import Dict, Optional, Tuple
 
 import cv2
 
 from app.stream_ingestor import StreamIngestor
+
+
+@dataclass
+class CameraEntry:
+    url: str
+    role: str
+    ingestor: StreamIngestor
 
 
 class StreamManager:
@@ -31,7 +39,7 @@ class StreamManager:
         self.use_ffmpeg = use_ffmpeg
         self.stale_threshold_seconds = stale_threshold_seconds
         self.storage_path = storage_path
-        self._rooms: Dict[str, Dict[str, StreamIngestor]] = {}
+        self._rooms: Dict[str, Dict[str, CameraEntry]] = {}
         self._lock = threading.Lock()
         self._load_storage()
 
@@ -55,7 +63,7 @@ class StreamManager:
             self._persist_storage_locked()
             return True
 
-    def add_camera(self, room_id: str, camera_id: str, url: str) -> bool:
+    def add_camera(self, room_id: str, camera_id: str, url: str, role: str) -> bool:
         with self._lock:
             if room_id not in self._rooms:
                 return False
@@ -73,7 +81,7 @@ class StreamManager:
                 self.read_timeout_seconds,
                 self.use_ffmpeg,
             )
-            cameras[camera_id] = ingestor
+            cameras[camera_id] = CameraEntry(url=url, role=role, ingestor=ingestor)
             ingestor.start()
             self._persist_storage_locked()
             return True
@@ -83,10 +91,10 @@ class StreamManager:
             cameras = self._rooms.get(room_id)
             if cameras is None:
                 return False
-            ingestor = cameras.pop(camera_id, None)
-            if ingestor is None:
+            entry = cameras.pop(camera_id, None)
+            if entry is None:
                 return False
-            ingestor.stop()
+            entry.ingestor.stop()
             self._persist_storage_locked()
             return True
 
@@ -95,16 +103,24 @@ class StreamManager:
             cameras = self._rooms.pop(room_id, None)
             if cameras is None:
                 return False
-            for ingestor in cameras.values():
-                ingestor.stop()
+            for entry in cameras.values():
+                entry.ingestor.stop()
             self._persist_storage_locked()
             return True
 
     def list_rooms(self) -> Dict[str, object]:
         with self._lock:
             return {
-                room_id: list(cameras.keys())
+                room_id: {
+                    camera_id: entry.role for camera_id, entry in cameras.items()
+                }
                 for room_id, cameras in self._rooms.items()
+            }
+
+    def list_camera_entries(self) -> Dict[str, Dict[str, CameraEntry]]:
+        with self._lock:
+            return {
+                room_id: dict(cameras) for room_id, cameras in self._rooms.items()
             }
 
     def get_snapshot(
@@ -114,10 +130,10 @@ class StreamManager:
             cameras = self._rooms.get(room_id)
             if cameras is None:
                 return None, None
-            ingestor = cameras.get(camera_id)
-            if ingestor is None:
+            entry = cameras.get(camera_id)
+            if entry is None:
                 return None, None
-        return ingestor.snapshot()
+        return entry.ingestor.snapshot()
 
     def _camera_status(self, metrics, timestamp: Optional[float]) -> Dict[str, object]:
         now = time.time()
@@ -154,8 +170,8 @@ class StreamManager:
         statuses: Dict[str, object] = {}
         overall = "healthy"
         for camera_id, ingestor in camera_items:
-            _frame, ts = ingestor.snapshot()
-            status = self._camera_status(ingestor.metrics, ts)
+            _frame, ts = ingestor.ingestor.snapshot()
+            status = self._camera_status(ingestor.ingestor.metrics, ts)
             statuses[camera_id] = status
             if status["health"] == "down":
                 overall = "down"
@@ -183,9 +199,12 @@ class StreamManager:
         return {"overall_status": overall, "rooms": rooms}
 
     def _persist_storage_locked(self) -> None:
-        payload: Dict[str, Dict[str, str]] = {}
+        payload: Dict[str, Dict[str, Dict[str, str]]] = {}
         for room_id, cameras in self._rooms.items():
-            payload[room_id] = {camera_id: cam.url for camera_id, cam in cameras.items()}
+            payload[room_id] = {
+                camera_id: {"url": cam.url, "role": cam.role}
+                for camera_id, cam in cameras.items()
+            }
 
         os.makedirs(os.path.dirname(self.storage_path) or ".", exist_ok=True)
         tmp_path = f"{self.storage_path}.tmp"
@@ -209,16 +228,28 @@ class StreamManager:
                 continue
             self._rooms[room_id] = {}
             for camera_id, url in cameras.items():
-                if not isinstance(camera_id, str) or not isinstance(url, str):
+                if not isinstance(camera_id, str):
                     continue
-                self._rooms[room_id][camera_id] = StreamIngestor(
-                    f"{room_id}:{camera_id}",
-                    url,
-                    self.frame_width,
-                    self.frame_height,
-                    self.target_fps,
-                    self.backoff_min_seconds,
-                    self.backoff_max_seconds,
-                    self.read_timeout_seconds,
-                    self.use_ffmpeg,
+                if isinstance(url, dict):
+                    camera_url = url.get("url")
+                    role = url.get("role", "other")
+                else:
+                    camera_url = url
+                    role = "other"
+                if not isinstance(camera_url, str):
+                    continue
+                self._rooms[room_id][camera_id] = CameraEntry(
+                    url=camera_url,
+                    role=role if isinstance(role, str) else "other",
+                    ingestor=StreamIngestor(
+                        f"{room_id}:{camera_id}",
+                        camera_url,
+                        self.frame_width,
+                        self.frame_height,
+                        self.target_fps,
+                        self.backoff_min_seconds,
+                        self.backoff_max_seconds,
+                        self.read_timeout_seconds,
+                        self.use_ffmpeg,
+                    ),
                 )

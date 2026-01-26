@@ -4,6 +4,7 @@ import cv2
 from fastapi import APIRouter, HTTPException, Response
 from pydantic import BaseModel, Field
 
+from app.motion_gate import MotionGateManager
 from app.stream_manager import StreamManager
 
 
@@ -14,7 +15,7 @@ def _encode_jpeg(frame: "cv2.typing.MatLike") -> Optional[bytes]:
     return encoded.tobytes()
 
 
-def build_router(manager: StreamManager) -> APIRouter:
+def build_router(manager: StreamManager, gate: MotionGateManager) -> APIRouter:
     router = APIRouter()
 
     class RoomCreate(BaseModel):
@@ -23,6 +24,7 @@ def build_router(manager: StreamManager) -> APIRouter:
     class CameraCreate(BaseModel):
         camera_id: str = Field(..., min_length=1)
         url: str = Field(..., min_length=1)
+        role: str = Field("other", pattern="^(front|back|other)$")
 
     @router.get("/health")
     def health() -> dict:
@@ -42,13 +44,17 @@ def build_router(manager: StreamManager) -> APIRouter:
         removed = manager.remove_room(room_id)
         if not removed:
             raise HTTPException(status_code=404, detail="Room not found")
+        gate.remove_room(room_id)
         return {"room_id": room_id, "removed": True}
 
     @router.post("/rooms/{room_id}/cameras")
     def add_camera(room_id: str, payload: CameraCreate) -> dict:
-        added = manager.add_camera(room_id, payload.camera_id, payload.url)
+        added = manager.add_camera(
+            room_id, payload.camera_id, payload.url, payload.role
+        )
         if not added:
             raise HTTPException(status_code=404, detail="Room not found or camera exists")
+        gate.add_camera(room_id, payload.camera_id, payload.role)
         return {"room_id": room_id, "camera_id": payload.camera_id, "added": True}
 
     @router.delete("/rooms/{room_id}/cameras/{camera_id}")
@@ -56,6 +62,7 @@ def build_router(manager: StreamManager) -> APIRouter:
         removed = manager.remove_camera(room_id, camera_id)
         if not removed:
             raise HTTPException(status_code=404, detail="Room or camera not found")
+        gate.remove_camera(room_id, camera_id)
         return {"room_id": room_id, "camera_id": camera_id, "removed": True}
 
     @router.get("/rooms/{room_id}/health")
@@ -63,6 +70,20 @@ def build_router(manager: StreamManager) -> APIRouter:
         status = manager.room_health(room_id)
         if status is None:
             raise HTTPException(status_code=404, detail="Room not found")
+        return status
+
+    @router.get("/rooms/{room_id}/activity")
+    def room_activity(room_id: str) -> dict:
+        status = gate.room_activity(room_id)
+        if status is None:
+            raise HTTPException(status_code=404, detail="Room not found")
+        return status
+
+    @router.get("/rooms/{room_id}/cameras/{camera_id}/activity")
+    def camera_activity(room_id: str, camera_id: str) -> dict:
+        status = gate.activity(room_id, camera_id)
+        if status is None:
+            raise HTTPException(status_code=404, detail="Room or camera not found")
         return status
 
     @router.get("/rooms/{room_id}/cameras/{camera_id}/snapshot")
@@ -74,5 +95,9 @@ def build_router(manager: StreamManager) -> APIRouter:
         if payload is None:
             raise HTTPException(status_code=500, detail="Failed to encode frame")
         return Response(content=payload, media_type="image/jpeg")
+
+    @router.get("/activity")
+    def all_activity() -> dict:
+        return gate.all_activity()
 
     return router
