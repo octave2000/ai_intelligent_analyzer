@@ -93,6 +93,13 @@ class Settings:
     perception_detection_width: int
     perception_detection_height: int
     perception_exam_mode: bool
+    inference_cheating_window_seconds: float
+    inference_cheating_emit_interval_seconds: float
+    inference_teacher_window_seconds: float
+    inference_teacher_emit_interval_seconds: float
+    inference_participation_window_seconds: float
+    inference_participation_emit_interval_seconds: float
+    inference_sync_turn_window_seconds: float
 
     def __init__(self) -> None:
         self.frame_width = _get_int("FRAME_WIDTH", 640)
@@ -175,6 +182,27 @@ class Settings:
         self.perception_detection_width = _get_int("PERCEPTION_DETECTION_WIDTH", 640)
         self.perception_detection_height = _get_int("PERCEPTION_DETECTION_HEIGHT", 360)
         self.perception_exam_mode = _get_bool("EXAM_MODE", False)
+        self.inference_cheating_window_seconds = _get_float(
+            "INFERENCE_CHEATING_WINDOW_SECONDS", 60.0
+        )
+        self.inference_cheating_emit_interval_seconds = _get_float(
+            "INFERENCE_CHEATING_EMIT_INTERVAL_SECONDS", 10.0
+        )
+        self.inference_teacher_window_seconds = _get_float(
+            "INFERENCE_TEACHER_WINDOW_SECONDS", 120.0
+        )
+        self.inference_teacher_emit_interval_seconds = _get_float(
+            "INFERENCE_TEACHER_EMIT_INTERVAL_SECONDS", 30.0
+        )
+        self.inference_participation_window_seconds = _get_float(
+            "INFERENCE_PARTICIPATION_WINDOW_SECONDS", 120.0
+        )
+        self.inference_participation_emit_interval_seconds = _get_float(
+            "INFERENCE_PARTICIPATION_EMIT_INTERVAL_SECONDS", 30.0
+        )
+        self.inference_sync_turn_window_seconds = _get_float(
+            "INFERENCE_SYNC_TURN_WINDOW_SECONDS", 2.0
+        )
 
 
 settings = Settings()

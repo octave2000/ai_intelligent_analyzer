@@ -4,6 +4,7 @@ import cv2
 from fastapi import APIRouter, HTTPException, Response
 from pydantic import BaseModel, Field
 
+from app.inference_manager import InferenceManager
 from app.motion_gate import MotionGateManager
 from app.perception_manager import PerceptionManager
 from app.stream_manager import StreamManager
@@ -17,7 +18,10 @@ def _encode_jpeg(frame: "cv2.typing.MatLike") -> Optional[bytes]:
 
 
 def build_router(
-    manager: StreamManager, gate: MotionGateManager, perception: PerceptionManager
+    manager: StreamManager,
+    gate: MotionGateManager,
+    perception: PerceptionManager,
+    inference: InferenceManager,
 ) -> APIRouter:
     router = APIRouter()
 
@@ -118,5 +122,9 @@ def build_router(
                 limit=limit, since=since, room_id=room_id, camera_id=camera_id
             )
         }
+
+    @router.get("/inference/outputs")
+    def inference_outputs(limit: int = 200, since: Optional[float] = None) -> dict:
+        return {"outputs": inference.get_outputs(limit=limit, since=since)}
 
     return router

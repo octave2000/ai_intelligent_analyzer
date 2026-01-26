@@ -2,6 +2,7 @@ from fastapi import FastAPI
 
 from app.api import build_router
 from app.config import settings
+from app.inference_manager import InferenceManager
 from app.motion_gate import MotionGateManager
 from app.perception_manager import PerceptionManager
 from app.stream_manager import StreamManager
@@ -62,18 +63,31 @@ def create_app() -> FastAPI:
         exam_mode=settings.perception_exam_mode,
     )
     perception.bootstrap_from_stream_manager()
+    inference = InferenceManager(
+        perception=perception,
+        exam_mode=settings.perception_exam_mode,
+        cheating_window_seconds=settings.inference_cheating_window_seconds,
+        cheating_emit_interval_seconds=settings.inference_cheating_emit_interval_seconds,
+        teacher_window_seconds=settings.inference_teacher_window_seconds,
+        teacher_emit_interval_seconds=settings.inference_teacher_emit_interval_seconds,
+        participation_window_seconds=settings.inference_participation_window_seconds,
+        participation_emit_interval_seconds=settings.inference_participation_emit_interval_seconds,
+        sync_turn_window_seconds=settings.inference_sync_turn_window_seconds,
+    )
 
     @app.on_event("startup")
     def _startup() -> None:
         manager.start()
         perception.start()
+        inference.start()
 
     @app.on_event("shutdown")
     def _shutdown() -> None:
         manager.stop()
         perception.stop()
+        inference.stop()
 
-    app.include_router(build_router(manager, gate, perception))
+    app.include_router(build_router(manager, gate, perception, inference))
     return app
 
 
