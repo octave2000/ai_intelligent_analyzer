@@ -30,6 +30,15 @@ def _get_ffmpeg_mode() -> str:
     return "auto"
 
 
+def _get_mode(name: str, default: str) -> str:
+    raw = os.getenv(name, default).strip().lower()
+    if raw in ("force", "on", "1", "true", "yes"):
+        return "force"
+    if raw in ("disable", "off", "0", "false", "no"):
+        return "disable"
+    return "auto"
+
+
 def _get_bool(name: str, default: bool) -> bool:
     raw = os.getenv(name)
     if raw is None:
@@ -93,6 +102,15 @@ class Settings:
     perception_detection_width: int
     perception_detection_height: int
     perception_exam_mode: bool
+    roster_path: str
+    attendance_path: str
+    face_similarity_threshold: float
+    face_model_name: str
+    face_model_root: str
+    yolo_mode: str
+    yolo_model_path: str
+    yolo_conf_threshold: float
+    yolo_iou_threshold: float
     inference_cheating_window_seconds: float
     inference_cheating_emit_interval_seconds: float
     inference_teacher_window_seconds: float
@@ -100,6 +118,10 @@ class Settings:
     inference_participation_window_seconds: float
     inference_participation_emit_interval_seconds: float
     inference_sync_turn_window_seconds: float
+    inference_fight_window_seconds: float
+    inference_fight_emit_interval_seconds: float
+    inference_fight_motion_threshold: float
+    inference_fight_proximity_threshold: int
 
     def __init__(self) -> None:
         self.frame_width = _get_int("FRAME_WIDTH", 640)
@@ -182,6 +204,17 @@ class Settings:
         self.perception_detection_width = _get_int("PERCEPTION_DETECTION_WIDTH", 640)
         self.perception_detection_height = _get_int("PERCEPTION_DETECTION_HEIGHT", 360)
         self.perception_exam_mode = _get_bool("EXAM_MODE", False)
+        self.roster_path = os.getenv("ROSTER_PATH", "data/roster.json")
+        self.attendance_path = os.getenv("ATTENDANCE_PATH", "data/attendance.json")
+        self.face_similarity_threshold = _get_float(
+            "FACE_SIMILARITY_THRESHOLD", 0.35
+        )
+        self.face_model_name = os.getenv("FACE_MODEL_NAME", "buffalo_s")
+        self.face_model_root = os.getenv("FACE_MODEL_ROOT", "") or None
+        self.yolo_mode = _get_mode("USE_YOLO", "auto")
+        self.yolo_model_path = os.getenv("YOLO_MODEL_PATH", "yolov8n.pt")
+        self.yolo_conf_threshold = _get_float("YOLO_CONF_THRESHOLD", 0.35)
+        self.yolo_iou_threshold = _get_float("YOLO_IOU_THRESHOLD", 0.45)
         self.inference_cheating_window_seconds = _get_float(
             "INFERENCE_CHEATING_WINDOW_SECONDS", 60.0
         )
@@ -202,6 +235,18 @@ class Settings:
         )
         self.inference_sync_turn_window_seconds = _get_float(
             "INFERENCE_SYNC_TURN_WINDOW_SECONDS", 2.0
+        )
+        self.inference_fight_window_seconds = _get_float(
+            "INFERENCE_FIGHT_WINDOW_SECONDS", 8.0
+        )
+        self.inference_fight_emit_interval_seconds = _get_float(
+            "INFERENCE_FIGHT_EMIT_INTERVAL_SECONDS", 10.0
+        )
+        self.inference_fight_motion_threshold = _get_float(
+            "INFERENCE_FIGHT_MOTION_THRESHOLD", 250.0
+        )
+        self.inference_fight_proximity_threshold = _get_int(
+            "INFERENCE_FIGHT_PROXIMITY_THRESHOLD", 2
         )
 
 

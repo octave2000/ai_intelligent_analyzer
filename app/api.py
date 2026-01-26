@@ -1,3 +1,4 @@
+import time
 from typing import Optional
 
 import cv2
@@ -8,6 +9,7 @@ from app.inference_manager import InferenceManager
 from app.motion_gate import MotionGateManager
 from app.perception_manager import PerceptionManager
 from app.stream_manager import StreamManager
+from app.attendance_manager import AttendanceManager
 
 
 def _encode_jpeg(frame: "cv2.typing.MatLike") -> Optional[bytes]:
@@ -22,6 +24,7 @@ def build_router(
     gate: MotionGateManager,
     perception: PerceptionManager,
     inference: InferenceManager,
+    attendance: AttendanceManager,
 ) -> APIRouter:
     router = APIRouter()
 
@@ -126,5 +129,14 @@ def build_router(
     @router.get("/inference/outputs")
     def inference_outputs(limit: int = 200, since: Optional[float] = None) -> dict:
         return {"outputs": inference.get_outputs(limit=limit, since=since)}
+
+    @router.get("/attendance/today")
+    def attendance_today() -> dict:
+        date_key = time.strftime("%Y-%m-%d", time.localtime())
+        return {"date": date_key, "attendance": attendance.get_attendance(date_key)}
+
+    @router.get("/attendance/{date_key}")
+    def attendance_by_date(date_key: str) -> dict:
+        return {"date": date_key, "attendance": attendance.get_attendance(date_key)}
 
     return router

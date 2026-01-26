@@ -8,7 +8,10 @@ from typing import Deque, Dict, List, Optional, Tuple
 import cv2
 import numpy as np
 
+from app.face_identifier import FaceIdentifier, FaceMatch
 from app.motion_gate import MotionGateManager
+from app.attendance_manager import AttendanceManager
+from app.yolo_detector import YoloDetector, YoloDetection
 from app.stream_manager import StreamManager
 
 
@@ -39,6 +42,11 @@ class TrackState:
     role: str = "unknown"
     role_confidence: float = 0.0
     last_orientation: Optional[str] = None
+    identity_id: Optional[str] = None
+    identity_name: Optional[str] = None
+    identity_role: Optional[str] = None
+    identity_score: float = 0.0
+    last_identity_time: float = 0.0
 
 
 @dataclass
@@ -152,6 +160,9 @@ class PerceptionManager:
         detection_width: int,
         detection_height: int,
         exam_mode: bool,
+        face_identifier: Optional[FaceIdentifier] = None,
+        attendance: Optional[AttendanceManager] = None,
+        yolo_detector: Optional[YoloDetector] = None,
     ) -> None:
         self.stream_manager = stream_manager
         self.gate = gate
@@ -176,6 +187,9 @@ class PerceptionManager:
         self.detection_width = detection_width
         self.detection_height = detection_height
         self.exam_mode = exam_mode
+        self.face_identifier = face_identifier
+        self.attendance = attendance
+        self.yolo_detector = yolo_detector
 
         self._cameras: Dict[str, Dict[str, CameraPerceptionState]] = {}
         self._lock = threading.Lock()
@@ -286,9 +300,16 @@ class PerceptionManager:
         if time.time() - ts > self.stale_seconds:
             return
 
+        faces: List[FaceMatch] = []
+        if self.face_identifier and self.face_identifier.ready():
+            try:
+                faces = self.face_identifier.detect_and_identify(frame)
+            except Exception:
+                faces = []
+
         detections = self._detect_people(frame)
         with state.lock:
-            self._update_tracks(state, frame, detections)
+            self._update_tracks(state, frame, detections, faces)
             objects = self._detect_objects(frame)
             self._update_object_tracks(state, objects)
             self._associate_objects(state)
@@ -296,6 +317,13 @@ class PerceptionManager:
             self._update_groups(state)
 
     def _detect_people(self, frame: "cv2.typing.MatLike") -> List[Detection]:
+        if self.yolo_detector and self.yolo_detector.ready():
+            detections = []
+            for det in self.yolo_detector.detect(frame):
+                if det.label:  # defensive
+                    if det.label == "person":
+                        detections.append(Detection(det.bbox, det.confidence))
+            return detections
         h, w = frame.shape[:2]
         scale_x = w / float(self.detection_width)
         scale_y = h / float(self.detection_height)
@@ -316,7 +344,11 @@ class PerceptionManager:
         return detections
 
     def _update_tracks(
-        self, state: CameraPerceptionState, frame: "cv2.typing.MatLike", detections: List[Detection]
+        self,
+        state: CameraPerceptionState,
+        frame: "cv2.typing.MatLike",
+        detections: List[Detection],
+        faces: List[FaceMatch],
     ) -> None:
         now = time.time()
         tracks = state.tracks
@@ -338,6 +370,7 @@ class PerceptionManager:
                 track.global_id = self._resolver.assign(state.camera_id, track.appearance)
             else:
                 self._resolver.refresh(track.global_id, track.appearance)
+            self._update_identity(state, track, faces)
             self._emit(
                 _event(
                     state,
@@ -369,6 +402,7 @@ class PerceptionManager:
             track.history.append(_bbox_center(detection.bbox))
             track.appearance = _appearance_hist(frame, detection.bbox)
             track.global_id = self._resolver.assign(state.camera_id, track.appearance)
+            self._update_identity(state, track, faces)
             tracks[track_id] = track
             self._emit(
                 _event(
@@ -403,6 +437,20 @@ class PerceptionManager:
             )
 
     def _update_role(self, state: CameraPerceptionState, track: TrackState, frame: "cv2.typing.MatLike") -> None:
+        if track.identity_role in ("teacher", "student"):
+            if track.identity_role != track.role or track.identity_score > track.role_confidence:
+                track.role = track.identity_role
+                track.role_confidence = min(1.0, max(0.7, track.identity_score))
+                self._emit(
+                    _event(
+                        state,
+                        "role_assigned",
+                        track.role_confidence,
+                        track.global_id,
+                        {"track_id": track.track_id, "role": track.role},
+                    )
+                )
+            return
         if track.role == "student" and track.role_confidence >= 0.7:
             return
         uniform_ratio = _uniform_ratio(frame, track.bbox, self.uniform_hsv_low, self.uniform_hsv_high)
@@ -438,6 +486,31 @@ class PerceptionManager:
                     )
                 )
 
+    def _update_identity(
+        self, state: CameraPerceptionState, track: TrackState, faces: List[FaceMatch]
+    ) -> None:
+        if not faces:
+            return
+        now = time.time()
+        if now - track.last_identity_time < 2.0:
+            return
+        match = _match_face_to_track(faces, track.bbox)
+        if match is None or match.person_id is None or match.name is None:
+            return
+        track.identity_id = match.person_id
+        track.identity_name = match.name
+        track.identity_role = match.role
+        track.identity_score = match.score
+        track.last_identity_time = now
+        if self.attendance:
+            self.attendance.mark_present(
+                person_id=match.person_id,
+                name=match.name,
+                role=match.role or "unknown",
+                camera_id=state.camera_id,
+                timestamp=now,
+            )
+
     def _update_orientation(self, state: CameraPerceptionState, track: TrackState) -> None:
         if len(track.history) < 2:
             return
@@ -462,6 +535,8 @@ class PerceptionManager:
             )
 
     def _detect_objects(self, frame: "cv2.typing.MatLike") -> List[ObjectDetection]:
+        if self.yolo_detector and self.yolo_detector.ready():
+            return self._detect_objects_yolo(frame)
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         edges = cv2.Canny(gray, 50, 150)
         contours, _hier = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -486,6 +561,16 @@ class PerceptionManager:
             if obj is None:
                 continue
             obj.bbox = (x, y, x + rw, y + rh)
+            detections.append(obj)
+        return detections
+
+    def _detect_objects_yolo(self, frame: "cv2.typing.MatLike") -> List[ObjectDetection]:
+        detections: List[ObjectDetection] = []
+        for det in self.yolo_detector.detect(frame):
+            obj = _map_yolo_label(det)
+            if obj is None:
+                continue
+            obj.bbox = det.bbox
             detections.append(obj)
         return detections
 
@@ -969,3 +1054,81 @@ def _cluster_groups(
         if not placed:
             groups.append([track])
     return groups
+
+
+def _match_face_to_track(
+    faces: List[FaceMatch], person_bbox: Tuple[int, int, int, int]
+) -> Optional[FaceMatch]:
+    best = None
+    best_iou = 0.0
+    for face in faces:
+        iou = _bbox_iou(face.bbox, person_bbox)
+        if iou > best_iou:
+            best_iou = iou
+            best = face
+    if best_iou < 0.05:
+        return None
+    return best
+
+
+def _map_yolo_label(det: YoloDetection) -> Optional[ObjectDetection]:
+    label = det.label
+    if label == "person":
+        return None
+    if label == "cell phone":
+        return ObjectDetection(
+            object_type="phone",
+            category="devices",
+            risk_level="low",
+            confidence=det.confidence,
+            bbox=det.bbox,
+        )
+    if label == "laptop":
+        return ObjectDetection(
+            object_type="laptop",
+            category="devices",
+            risk_level="low",
+            confidence=det.confidence,
+            bbox=det.bbox,
+        )
+    if label == "book":
+        return ObjectDetection(
+            object_type="book",
+            category="academic",
+            risk_level="low",
+            confidence=det.confidence,
+            bbox=det.bbox,
+        )
+    if label == "backpack":
+        return ObjectDetection(
+            object_type="backpack",
+            category="personal",
+            risk_level="low",
+            confidence=det.confidence,
+            bbox=det.bbox,
+        )
+    if label in ("knife", "scissors"):
+        return ObjectDetection(
+            object_type=label,
+            category="suspicious",
+            risk_level="high",
+            confidence=det.confidence,
+            bbox=det.bbox,
+        )
+    if label in ("handbag", "suitcase"):
+        return ObjectDetection(
+            object_type="pouch",
+            category="personal",
+            risk_level="low",
+            confidence=det.confidence,
+            bbox=det.bbox,
+        )
+    if label in ("tablet", "tv", "remote", "keyboard", "mouse"):
+        return ObjectDetection(
+            object_type="device",
+            category="devices",
+            risk_level="low",
+            confidence=det.confidence,
+            bbox=det.bbox,
+        )
+    return None

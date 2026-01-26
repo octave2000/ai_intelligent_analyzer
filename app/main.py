@@ -1,11 +1,14 @@
 from fastapi import FastAPI
 
 from app.api import build_router
+from app.attendance_manager import AttendanceManager
 from app.config import settings
+from app.face_identifier import FaceIdentifier
 from app.inference_manager import InferenceManager
 from app.motion_gate import MotionGateManager
 from app.perception_manager import PerceptionManager
 from app.stream_manager import StreamManager
+from app.yolo_detector import YoloDetector
 
 
 def create_app() -> FastAPI:
@@ -35,6 +38,22 @@ def create_app() -> FastAPI:
         downsample_height=settings.gate_downsample_height,
     )
     gate.bootstrap_from_stream_manager()
+    attendance = AttendanceManager(storage_path=settings.attendance_path)
+    face_identifier = FaceIdentifier(
+        roster_path=settings.roster_path,
+        similarity_threshold=settings.face_similarity_threshold,
+        model_name=settings.face_model_name,
+        model_root=settings.face_model_root,
+    )
+    yolo_detector = None
+    if settings.yolo_mode != "disable":
+        yolo_candidate = YoloDetector(
+            model_path=settings.yolo_model_path,
+            conf_threshold=settings.yolo_conf_threshold,
+            iou_threshold=settings.yolo_iou_threshold,
+        )
+        if yolo_candidate.ready() or settings.yolo_mode == "force":
+            yolo_detector = yolo_candidate
     perception = PerceptionManager(
         stream_manager=manager,
         gate=gate,
@@ -61,6 +80,9 @@ def create_app() -> FastAPI:
         detection_width=settings.perception_detection_width,
         detection_height=settings.perception_detection_height,
         exam_mode=settings.perception_exam_mode,
+        face_identifier=face_identifier,
+        attendance=attendance,
+        yolo_detector=yolo_detector,
     )
     perception.bootstrap_from_stream_manager()
     inference = InferenceManager(
@@ -73,6 +95,10 @@ def create_app() -> FastAPI:
         participation_window_seconds=settings.inference_participation_window_seconds,
         participation_emit_interval_seconds=settings.inference_participation_emit_interval_seconds,
         sync_turn_window_seconds=settings.inference_sync_turn_window_seconds,
+        fight_window_seconds=settings.inference_fight_window_seconds,
+        fight_emit_interval_seconds=settings.inference_fight_emit_interval_seconds,
+        fight_motion_threshold=settings.inference_fight_motion_threshold,
+        fight_proximity_threshold=settings.inference_fight_proximity_threshold,
     )
 
     @app.on_event("startup")
@@ -87,7 +113,7 @@ def create_app() -> FastAPI:
         perception.stop()
         inference.stop()
 
-    app.include_router(build_router(manager, gate, perception, inference))
+    app.include_router(build_router(manager, gate, perception, inference, attendance))
     return app
 
 

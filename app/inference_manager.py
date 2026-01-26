@@ -10,7 +10,10 @@ from app.perception_manager import PerceptionManager
 @dataclass
 class PersonSignalWindow:
     events: Deque[Dict[str, object]] = field(default_factory=lambda: deque(maxlen=500))
-    last_output: float = 0.0
+    last_cheating_output: float = 0.0
+    last_teacher_output: float = 0.0
+    last_participation_output: float = 0.0
+    last_fight_output: float = 0.0
 
 
 @dataclass
@@ -31,6 +34,10 @@ class InferenceManager:
         participation_window_seconds: float,
         participation_emit_interval_seconds: float,
         sync_turn_window_seconds: float,
+        fight_window_seconds: float,
+        fight_emit_interval_seconds: float,
+        fight_motion_threshold: float,
+        fight_proximity_threshold: int,
     ) -> None:
         self.perception = perception
         self.exam_mode = exam_mode
@@ -41,6 +48,10 @@ class InferenceManager:
         self.participation_window_seconds = participation_window_seconds
         self.participation_emit_interval_seconds = participation_emit_interval_seconds
         self.sync_turn_window_seconds = sync_turn_window_seconds
+        self.fight_window_seconds = fight_window_seconds
+        self.fight_emit_interval_seconds = fight_emit_interval_seconds
+        self.fight_motion_threshold = fight_motion_threshold
+        self.fight_proximity_threshold = fight_proximity_threshold
 
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
@@ -112,12 +123,13 @@ class InferenceManager:
                 self._maybe_emit_teacher(global_id, window, now)
             if role == "student":
                 self._maybe_emit_participation(global_id, window, now)
+            self._maybe_emit_fight(global_id, window, now)
 
         for group_id, window in list(self._group_windows.items()):
             self._maybe_emit_group_participation(group_id, window, now)
 
     def _maybe_emit_cheating(self, global_id: int, window: PersonSignalWindow, now: float) -> None:
-        if now - window.last_output < self.cheating_emit_interval_seconds:
+        if now - window.last_cheating_output < self.cheating_emit_interval_seconds:
             return
         recent = _filter_recent(window.events, now - self.cheating_window_seconds)
         signals: List[str] = []
@@ -167,11 +179,11 @@ class InferenceManager:
             "confidence": confidence,
             "time_window": self.cheating_window_seconds,
         }
-        window.last_output = now
+        window.last_cheating_output = now
         self._outputs.append(output)
 
     def _maybe_emit_teacher(self, global_id: int, window: PersonSignalWindow, now: float) -> None:
-        if now - window.last_output < self.teacher_emit_interval_seconds:
+        if now - window.last_teacher_output < self.teacher_emit_interval_seconds:
             return
         recent = _filter_recent(window.events, now - self.teacher_window_seconds)
         if not recent:
@@ -202,11 +214,11 @@ class InferenceManager:
             },
             "confidence": min(1.0, 0.4 + 0.6 * (movement_score + interaction_score) / 2.0),
         }
-        window.last_output = now
+        window.last_teacher_output = now
         self._outputs.append(output)
 
     def _maybe_emit_participation(self, global_id: int, window: PersonSignalWindow, now: float) -> None:
-        if now - window.last_output < self.participation_emit_interval_seconds:
+        if now - window.last_participation_output < self.participation_emit_interval_seconds:
             return
         recent = _filter_recent(window.events, now - self.participation_window_seconds)
         if not recent:
@@ -236,7 +248,33 @@ class InferenceManager:
             "participation_level": level,
             "confidence": min(1.0, 0.3 + score),
         }
-        window.last_output = now
+        window.last_participation_output = now
+        self._outputs.append(output)
+
+    def _maybe_emit_fight(self, global_id: int, window: PersonSignalWindow, now: float) -> None:
+        if now - window.last_fight_output < self.fight_emit_interval_seconds:
+            return
+        recent = _filter_recent(window.events, now - self.fight_window_seconds)
+        if not recent:
+            return
+        movement = _movement_distance(recent)
+        proximity = _count_proximity_close(recent)
+        if movement < self.fight_motion_threshold or proximity < self.fight_proximity_threshold:
+            return
+        involved = _extract_related_ids(recent, global_id)
+        signals = ["rapid_motion", "close_proximity"]
+        confidence = min(1.0, 0.4 + (movement / (self.fight_motion_threshold * 2.0)) * 0.3 + proximity * 0.1)
+        output = {
+            "timestamp": now,
+            "type": "safety_suspicion",
+            "category": "fight",
+            "global_person_id": global_id,
+            "related_global_ids": involved,
+            "signals": signals,
+            "confidence": min(1.0, confidence),
+            "time_window": self.fight_window_seconds,
+        }
+        window.last_fight_output = now
         self._outputs.append(output)
 
     def _maybe_emit_group_participation(self, group_id: int, window: GroupSignalWindow, now: float) -> None:
@@ -367,3 +405,18 @@ def _group_duration(events: List[Dict[str, object]]) -> float:
 def _group_motion_intensity(events: List[Dict[str, object]]) -> float:
     counts = len([e for e in events if e.get("event_type") == "group_updated"])
     return min(1.0, counts / 5.0)
+
+
+def _extract_related_ids(events: List[Dict[str, object]], global_id: int) -> List[int]:
+    related = set()
+    for e in events:
+        if e.get("event_type") != "proximity_event":
+            continue
+        gids = e.get("global_ids")
+        if not isinstance(gids, list):
+            continue
+        if global_id in gids:
+            for gid in gids:
+                if isinstance(gid, int) and gid != global_id:
+                    related.add(gid)
+    return sorted(related)
