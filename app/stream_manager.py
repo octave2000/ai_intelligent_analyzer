@@ -46,14 +46,14 @@ class StreamManager:
     def start(self) -> None:
         with self._lock:
             for cameras in self._rooms.values():
-                for ingestor in cameras.values():
-                    ingestor.start()
+                for entry in cameras.values():
+                    entry.ingestor.start()
 
     def stop(self) -> None:
         with self._lock:
             for cameras in self._rooms.values():
-                for ingestor in cameras.values():
-                    ingestor.stop()
+                for entry in cameras.values():
+                    entry.ingestor.stop()
 
     def register_room(self, room_id: str) -> bool:
         with self._lock:
@@ -169,9 +169,9 @@ class StreamManager:
 
         statuses: Dict[str, object] = {}
         overall = "healthy"
-        for camera_id, ingestor in camera_items:
-            _frame, ts = ingestor.ingestor.snapshot()
-            status = self._camera_status(ingestor.ingestor.metrics, ts)
+        for camera_id, entry in camera_items:
+            _frame, ts = entry.ingestor.snapshot()
+            status = self._camera_status(entry.ingestor.metrics, ts)
             statuses[camera_id] = status
             if status["health"] == "down":
                 overall = "down"
