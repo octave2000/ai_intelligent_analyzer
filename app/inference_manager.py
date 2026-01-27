@@ -1,3 +1,4 @@
+import logging
 import threading
 import time
 from collections import deque
@@ -5,6 +6,8 @@ from dataclasses import dataclass, field
 from typing import Deque, Dict, List, Optional, Tuple
 
 from app.perception_manager import PerceptionManager
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -100,6 +103,11 @@ class InferenceManager:
     def _consume_event(self, event: Dict[str, object]) -> None:
         global_id = _get_int(event, "global_person_id")
         event_type = event.get("event_type")
+        logger.debug(
+            "inference.consume_event event_type=%s global_person_id=%s",
+            event_type,
+            global_id,
+        )
         if event_type == "role_assigned" and global_id is not None:
             role = event.get("role")
             if isinstance(role, str):
@@ -182,6 +190,12 @@ class InferenceManager:
         }
         window.last_cheating_output = now
         self._outputs.append(output)
+        logger.info(
+            "inference.output type=%s global_person_id=%s score=%.3f",
+            output.get("type"),
+            global_id,
+            score,
+        )
 
     def _maybe_emit_teacher(self, global_id: int, window: PersonSignalWindow, now: float) -> None:
         if now - window.last_teacher_output < self.teacher_emit_interval_seconds:
@@ -217,6 +231,12 @@ class InferenceManager:
         }
         window.last_teacher_output = now
         self._outputs.append(output)
+        logger.info(
+            "inference.output type=%s teacher_global_id=%s score=%.3f",
+            output.get("type"),
+            global_id,
+            engagement,
+        )
 
     def _maybe_emit_participation(self, global_id: int, window: PersonSignalWindow, now: float) -> None:
         if now - window.last_participation_output < self.participation_emit_interval_seconds:
@@ -251,6 +271,12 @@ class InferenceManager:
         }
         window.last_participation_output = now
         self._outputs.append(output)
+        logger.info(
+            "inference.output type=%s student_global_id=%s level=%s",
+            output.get("type"),
+            global_id,
+            level,
+        )
 
     def _maybe_emit_fight(self, global_id: int, window: PersonSignalWindow, now: float) -> None:
         if now - window.last_fight_output < self.fight_emit_interval_seconds:
@@ -277,6 +303,12 @@ class InferenceManager:
         }
         window.last_fight_output = now
         self._outputs.append(output)
+        logger.info(
+            "inference.output type=%s global_person_id=%s confidence=%.3f",
+            output.get("type"),
+            global_id,
+            output.get("confidence"),
+        )
 
     def _maybe_emit_group_participation(self, group_id: int, window: GroupSignalWindow, now: float) -> None:
         if now - window.last_output < self.participation_emit_interval_seconds:
@@ -303,6 +335,12 @@ class InferenceManager:
         }
         window.last_output = now
         self._outputs.append(output)
+        logger.info(
+            "inference.output type=%s group_id=%s level=%s",
+            output.get("type"),
+            group_id,
+            level,
+        )
 
 
 def _filter_recent(events: Deque[Dict[str, object]], since: float) -> List[Dict[str, object]]:

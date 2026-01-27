@@ -1,10 +1,13 @@
 import json
+import logging
 import os
 import threading
 import time
 from collections import deque
 from dataclasses import dataclass, field
 from typing import Deque, Dict, Optional
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -48,6 +51,12 @@ class OverlayStore:
             buf = room.setdefault(camera_id, OverlayBuffer())
             buf.events.append(event)
             self._prune_locked(buf, now)
+        logger.debug(
+            "overlay_store.add_event room_id=%s camera_id=%s event_type=%s",
+            room_id,
+            camera_id,
+            event.get("event_type"),
+        )
 
     def _run(self) -> None:
         while not self._stop_event.is_set():
@@ -87,6 +96,13 @@ class OverlayStore:
                 handle.write(json.dumps(event, separators=(",", ":")))
                 handle.write("\n")
         os.replace(tmp_path, file_path)
+        logger.info(
+            "overlay_store.flush room_id=%s camera_id=%s events=%d path=%s",
+            room_id,
+            camera_id,
+            len(events),
+            file_path,
+        )
 
     def _prune_locked(self, buf: OverlayBuffer, now: float) -> None:
         cutoff = now - self.retention_seconds

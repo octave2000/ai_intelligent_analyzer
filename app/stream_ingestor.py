@@ -165,6 +165,7 @@
 #         self.metrics.is_running = False
 
 
+import logging
 import os
 import threading
 import time
@@ -181,6 +182,8 @@ os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp"
 
 # Optional but recommended for low-latency live streams
 os.environ["OPENCV_FFMPEG_LOGLEVEL"] = "error"
+
+logger = logging.getLogger(__name__)
 
 
 # ------------------------------------------------------------------
@@ -237,6 +240,7 @@ class StreamIngestor:
         if self._thread and self._thread.is_alive():
             return
 
+        logger.info("stream_ingestor.start stream_id=%s url=%s", self.stream_id, self.url)
         self._stop_event.clear()
         self._thread = threading.Thread(
             target=self._run,
@@ -249,6 +253,7 @@ class StreamIngestor:
         self._stop_event.set()
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=2.0)
+        logger.info("stream_ingestor.stop stream_id=%s", self.stream_id)
 
     def snapshot(
         self,
@@ -274,6 +279,11 @@ class StreamIngestor:
 
         if not cap.isOpened():
             cap.release()
+            logger.warning(
+                "stream_ingestor.open_failed stream_id=%s url=%s",
+                self.stream_id,
+                self.url,
+            )
             return None
 
         # Reduce latency & buffering
@@ -343,6 +353,11 @@ class StreamIngestor:
 
                     self.metrics.frames_received_total += 1
                     self.metrics.last_error_message = None
+                    logger.debug(
+                        "stream_ingestor.frame stream_id=%s ts=%.3f",
+                        self.stream_id,
+                        last_ok,
+                    )
 
             except Exception as exc:
                 self.metrics.last_error_message = f"Stream error: {exc}"

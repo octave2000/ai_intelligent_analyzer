@@ -1,3 +1,4 @@
+import logging
 import math
 import threading
 import time
@@ -15,6 +16,7 @@ from app.yolo_detector import YoloDetector, YoloDetection
 from app.overlay_store import OverlayStore
 from app.stream_manager import StreamManager
 
+logger = logging.getLogger(__name__)
 
 @dataclass
 class Detection:
@@ -277,6 +279,12 @@ class PerceptionManager:
 
     def _emit(self, event: Dict[str, object]) -> None:
         self._events.append(event)
+        logger.info(
+            "perception.event room_id=%s camera_id=%s event_type=%s",
+            event.get("room_id"),
+            event.get("camera_id"),
+            event.get("event_type"),
+        )
         if self.overlay_store is not None:
             room_id = event.get("room_id")
             camera_id = event.get("camera_id")
@@ -293,9 +301,20 @@ class PerceptionManager:
                 for camera_id, state in cameras.items():
                     gate_info = self.gate.activity(room_id, camera_id)
                     if gate_info is None:
+                        logger.debug(
+                            "perception.gate_missing room_id=%s camera_id=%s",
+                            room_id,
+                            camera_id,
+                        )
                         continue
                     gate_state = gate_info.get("activity_state")
                     if not isinstance(gate_state, str) or gate_state not in ("IDLE", "ACTIVE", "SPIKE"):
+                        logger.debug(
+                            "perception.gate_invalid room_id=%s camera_id=%s gate_state=%s",
+                            room_id,
+                            camera_id,
+                            gate_state,
+                        )
                         continue
                     if gate_state == "IDLE":
                         continue
@@ -308,6 +327,12 @@ class PerceptionManager:
                     if now - state.last_run < interval:
                         continue
                     state.last_run = now
+                    logger.debug(
+                        "perception.process_start room_id=%s camera_id=%s gate_state=%s",
+                        room_id,
+                        camera_id,
+                        gate_state,
+                    )
                     self._process_camera(state)
 
             time.sleep(0.1)
@@ -315,8 +340,18 @@ class PerceptionManager:
     def _process_camera(self, state: CameraPerceptionState) -> None:
         frame, ts = self.stream_manager.get_snapshot(state.room_id, state.camera_id)
         if frame is None or ts is None:
+            logger.debug(
+                "perception.frame_missing room_id=%s camera_id=%s",
+                state.room_id,
+                state.camera_id,
+            )
             return
         if time.time() - ts > self.stale_seconds:
+            logger.debug(
+                "perception.frame_stale room_id=%s camera_id=%s",
+                state.room_id,
+                state.camera_id,
+            )
             return
 
         faces: List[FaceMatch] = []
@@ -325,11 +360,29 @@ class PerceptionManager:
                 faces = self.face_identifier.detect_and_identify(frame)
             except Exception:
                 faces = []
+        logger.debug(
+            "perception.detect_faces room_id=%s camera_id=%s faces=%d",
+            state.room_id,
+            state.camera_id,
+            len(faces),
+        )
 
         detections = self._detect_people(frame)
+        logger.debug(
+            "perception.detect_people room_id=%s camera_id=%s count=%d",
+            state.room_id,
+            state.camera_id,
+            len(detections),
+        )
         with state.lock:
             self._update_tracks(state, frame, detections, faces)
             objects = self._detect_objects(frame)
+            logger.debug(
+                "perception.detect_objects room_id=%s camera_id=%s count=%d",
+                state.room_id,
+                state.camera_id,
+                len(objects),
+            )
             self._update_object_tracks(state, objects)
             self._associate_objects(state)
             self._update_proximity(state)

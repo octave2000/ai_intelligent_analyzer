@@ -1,3 +1,4 @@
+import logging
 import threading
 import time
 from collections import deque
@@ -9,6 +10,7 @@ import numpy as np
 
 from app.stream_manager import CameraEntry, StreamManager
 
+logger = logging.getLogger(__name__)
 
 @dataclass
 class CameraGateState:
@@ -180,16 +182,32 @@ class MotionGateManager:
                 gate.room_id, gate.camera_id
             )
             if frame_ts is None or frame is None:
+                logger.debug(
+                    "motion_gate.frame_missing room_id=%s camera_id=%s",
+                    gate.room_id,
+                    gate.camera_id,
+                )
                 self._set_idle(gate)
                 continue
 
             age = time.time() - frame_ts
             if age > gate.stale_seconds:
+                logger.debug(
+                    "motion_gate.frame_stale room_id=%s camera_id=%s age=%.2f",
+                    gate.room_id,
+                    gate.camera_id,
+                    age,
+                )
                 self._set_idle(gate)
                 continue
 
             processed = self._preprocess(frame, gate.downsample_width, gate.downsample_height)
             if processed is None:
+                logger.debug(
+                    "motion_gate.preprocess_failed room_id=%s camera_id=%s",
+                    gate.room_id,
+                    gate.camera_id,
+                )
                 self._set_idle(gate)
                 continue
 
@@ -225,6 +243,7 @@ class MotionGateManager:
 
     def _transition_state(self, gate: CameraGateState, score: float) -> None:
         now = time.time()
+        prev_state = gate.state
         state = gate.state
         if state == "SPIKE":
             if gate.last_spike_time is not None:
@@ -237,23 +256,59 @@ class MotionGateManager:
             else:
                 gate.state = "IDLE"
             gate.last_state_change = now
+            if gate.state != prev_state:
+                logger.info(
+                    "motion_gate.state room_id=%s camera_id=%s %s->%s score=%.3f",
+                    gate.room_id,
+                    gate.camera_id,
+                    prev_state,
+                    gate.state,
+                    score,
+                )
             return
 
         if score >= gate.spike_enter:
             gate.state = "SPIKE"
             gate.last_spike_time = now
             gate.last_state_change = now
+            if gate.state != prev_state:
+                logger.info(
+                    "motion_gate.state room_id=%s camera_id=%s %s->%s score=%.3f",
+                    gate.room_id,
+                    gate.camera_id,
+                    prev_state,
+                    gate.state,
+                    score,
+                )
             return
 
         if state == "ACTIVE":
             if score < gate.active_exit:
                 gate.state = "IDLE"
                 gate.last_state_change = now
+                if gate.state != prev_state:
+                    logger.info(
+                        "motion_gate.state room_id=%s camera_id=%s %s->%s score=%.3f",
+                        gate.room_id,
+                        gate.camera_id,
+                        prev_state,
+                        gate.state,
+                        score,
+                    )
             return
 
         if score >= gate.active_enter:
             gate.state = "ACTIVE"
             gate.last_state_change = now
+            if gate.state != prev_state:
+                logger.info(
+                    "motion_gate.state room_id=%s camera_id=%s %s->%s score=%.3f",
+                    gate.room_id,
+                    gate.camera_id,
+                    prev_state,
+                    gate.state,
+                    score,
+                )
 
     @staticmethod
     def _preprocess(

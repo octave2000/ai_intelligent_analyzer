@@ -1,3 +1,6 @@
+import logging
+import os
+
 from fastapi import FastAPI
 
 from app.api import build_router
@@ -13,6 +16,11 @@ from app.yolo_detector import YoloDetector
 
 
 def create_app() -> FastAPI:
+    log_level = os.getenv("LOG_LEVEL", "INFO").upper()
+    logging.basicConfig(
+        level=log_level,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
     app = FastAPI(title="Classroom AI - Part 1")
     manager = StreamManager(
         frame_width=settings.frame_width,

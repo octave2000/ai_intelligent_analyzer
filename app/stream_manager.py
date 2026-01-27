@@ -260,6 +260,7 @@
 
 
 import json
+import logging
 import os
 import threading
 import time
@@ -269,6 +270,8 @@ from typing import Dict, Optional, Tuple
 import cv2
 
 from app.stream_ingestor import StreamIngestor
+
+logger = logging.getLogger(__name__)
 
 
 # ------------------------------------------------------------------
@@ -322,12 +325,14 @@ class StreamManager:
             for cameras in self._rooms.values():
                 for entry in cameras.values():
                     entry.ingestor.start()
+        logger.info("stream_manager.start rooms=%d", len(self._rooms))
 
     def stop(self) -> None:
         with self._lock:
             for cameras in self._rooms.values():
                 for entry in cameras.values():
                     entry.ingestor.stop()
+        logger.info("stream_manager.stop")
 
     # --------------------------------------------------------------
     # Room & camera management
@@ -338,6 +343,7 @@ class StreamManager:
                 return False
             self._rooms[room_id] = {}
             self._persist_storage_locked()
+            logger.info("stream_manager.room_registered room_id=%s", room_id)
             return True
 
     def add_camera(self, room_id: str, camera_id: str, url: str, role: str) -> bool:
@@ -369,6 +375,13 @@ class StreamManager:
 
             ingestor.start()
             self._persist_storage_locked()
+            logger.info(
+                "stream_manager.camera_added room_id=%s camera_id=%s role=%s url=%s",
+                room_id,
+                camera_id,
+                role,
+                url,
+            )
             return True
 
     def remove_camera(self, room_id: str, camera_id: str) -> bool:
@@ -383,6 +396,11 @@ class StreamManager:
 
             entry.ingestor.stop()
             self._persist_storage_locked()
+            logger.info(
+                "stream_manager.camera_removed room_id=%s camera_id=%s",
+                room_id,
+                camera_id,
+            )
             return True
 
     def remove_room(self, room_id: str) -> bool:
@@ -395,6 +413,7 @@ class StreamManager:
                 entry.ingestor.stop()
 
             self._persist_storage_locked()
+            logger.info("stream_manager.room_removed room_id=%s", room_id)
             return True
 
     # --------------------------------------------------------------
@@ -419,13 +438,37 @@ class StreamManager:
         with self._lock:
             cameras = self._rooms.get(room_id)
             if cameras is None:
+                logger.debug(
+                    "stream_manager.snapshot_miss room_id=%s camera_id=%s reason=room_missing",
+                    room_id,
+                    camera_id,
+                )
                 return None, None
 
             entry = cameras.get(camera_id)
             if entry is None:
+                logger.debug(
+                    "stream_manager.snapshot_miss room_id=%s camera_id=%s reason=camera_missing",
+                    room_id,
+                    camera_id,
+                )
                 return None, None
 
-        return entry.ingestor.snapshot()
+        frame, ts = entry.ingestor.snapshot()
+        if frame is None or ts is None:
+            logger.debug(
+                "stream_manager.snapshot_empty room_id=%s camera_id=%s",
+                room_id,
+                camera_id,
+            )
+        else:
+            logger.debug(
+                "stream_manager.snapshot_ok room_id=%s camera_id=%s ts=%.3f",
+                room_id,
+                camera_id,
+                ts,
+            )
+        return frame, ts
 
     # --------------------------------------------------------------
     # Health checks
