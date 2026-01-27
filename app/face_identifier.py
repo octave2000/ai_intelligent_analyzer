@@ -104,9 +104,17 @@ class FaceIdentifier:
             name = person.get("name")
             role = person.get("role", "unknown")
             images = person.get("images", [])
+            embeddings_raw = person.get("embeddings", [])
             if not isinstance(person_id, str) or not isinstance(name, str):
                 continue
             embeddings: List[np.ndarray] = []
+            if isinstance(embeddings_raw, list):
+                for emb in embeddings_raw:
+                    if not isinstance(emb, list):
+                        continue
+                    arr = np.array(emb, dtype=np.float32)
+                    if arr.size > 0:
+                        embeddings.append(arr)
             if isinstance(images, list):
                 for path in images:
                     if not isinstance(path, str):

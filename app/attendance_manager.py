@@ -41,7 +41,19 @@ class AttendanceManager:
                 day[person_id] = entry
             else:
                 entry["last_seen"] = timestamp
-                entry["seen_count"] = int(entry.get("seen_count", 0)) + 1
+                seen_raw = entry.get("seen_count", 0)
+                if isinstance(seen_raw, int):
+                    seen_value = seen_raw
+                elif isinstance(seen_raw, float):
+                    seen_value = int(seen_raw)
+                elif isinstance(seen_raw, str):
+                    try:
+                        seen_value = int(seen_raw)
+                    except ValueError:
+                        seen_value = 0
+                else:
+                    seen_value = 0
+                entry["seen_count"] = int(seen_value) + 1
                 entry["camera_id"] = camera_id
             self._flush_if_needed_locked()
 

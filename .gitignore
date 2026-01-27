@@ -5,3 +5,4 @@ venv/
 data/
 *.jpg
 .DS_Store
+.env

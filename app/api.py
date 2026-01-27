@@ -139,4 +139,30 @@ def build_router(
     def attendance_by_date(date_key: str) -> dict:
         return {"date": date_key, "attendance": attendance.get_attendance(date_key)}
 
+    @router.get("/dashboard/summary")
+    def dashboard_summary(window_seconds: int = 300) -> dict:
+        now = time.time()
+        since = now - max(30, min(3600, window_seconds))
+        outputs = inference.get_outputs(limit=500, since=since)
+        output_counts: dict = {}
+        for item in outputs:
+            kind = item.get("type", "unknown")
+            output_counts[kind] = output_counts.get(kind, 0) + 1
+
+        date_key = time.strftime("%Y-%m-%d", time.localtime())
+        return {
+            "timestamp": now,
+            "health": manager.health(),
+            "activity": gate.all_activity(),
+            "attendance": {
+                "date": date_key,
+                "count": len(attendance.get_attendance(date_key)),
+            },
+            "inference": {
+                "window_seconds": int(max(30, min(3600, window_seconds))),
+                "counts": output_counts,
+                "recent": outputs[-20:],
+            },
+        }
+
     return router

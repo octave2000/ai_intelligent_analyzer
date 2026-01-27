@@ -1,5 +1,13 @@
 import os
 
+try:
+    from dotenv import load_dotenv
+except Exception:  # pragma: no cover - optional dependency
+    load_dotenv = None
+
+if load_dotenv is not None:
+    load_dotenv(".env", override=False)
+
 
 def _get_int(name: str, default: int) -> int:
     raw = os.getenv(name)
