@@ -201,7 +201,12 @@ class PerceptionManager:
             max_age_seconds=global_max_age_seconds,
         )
         self._hog = cv2.HOGDescriptor()
-        self._hog.setSVMDetector(cv2.HOGDescriptor_getDefaultPeopleDetector())
+        detector_fn = getattr(cv2, "HOGDescriptor_getDefaultPeopleDetector", None)
+        if detector_fn is not None:
+            try:
+                self._hog.setSVMDetector(detector_fn())
+            except Exception:
+                pass
 
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
@@ -251,12 +256,16 @@ class PerceptionManager:
         limit = max(1, min(1000, limit))
         results: List[Dict[str, object]] = []
         for event in reversed(self._events):
-            if since is not None and event.get("timestamp", 0.0) <= since:
+            if since is not None and _get_float(event, "timestamp") <= since:
                 continue
-            if room_id is not None and event.get("room_id") != room_id:
-                continue
-            if camera_id is not None and event.get("camera_id") != camera_id:
-                continue
+            if room_id is not None:
+                event_room = event.get("room_id")
+                if not isinstance(event_room, str) or event_room != room_id:
+                    continue
+            if camera_id is not None:
+                event_camera = event.get("camera_id")
+                if not isinstance(event_camera, str) or event_camera != camera_id:
+                    continue
             results.append(event)
             if len(results) >= limit:
                 break
@@ -278,13 +287,15 @@ class PerceptionManager:
                     if gate_info is None:
                         continue
                     gate_state = gate_info.get("activity_state")
+                    if not isinstance(gate_state, str) or gate_state not in ("IDLE", "ACTIVE", "SPIKE"):
+                        continue
                     if gate_state == "IDLE":
                         continue
                     interval = self.active_interval_seconds
                     if gate_state == "SPIKE":
                         if state.last_spike_time is None:
                             state.last_spike_time = now
-                        if now - state.last_spike_time <= self.spike_burst_seconds:
+                        if state.last_spike_time is not None and now - state.last_spike_time <= self.spike_burst_seconds:
                             interval = self.spike_interval_seconds
                     if now - state.last_run < interval:
                         continue
@@ -317,9 +328,10 @@ class PerceptionManager:
             self._update_groups(state)
 
     def _detect_people(self, frame: "cv2.typing.MatLike") -> List[Detection]:
-        if self.yolo_detector and self.yolo_detector.ready():
+        detector = self.yolo_detector
+        if detector is not None and detector.ready():
             detections = []
-            for det in self.yolo_detector.detect(frame):
+            for det in detector.detect(frame):
                 if det.label:  # defensive
                     if det.label == "person":
                         detections.append(Detection(det.bbox, det.confidence))
@@ -535,7 +547,7 @@ class PerceptionManager:
             )
 
     def _detect_objects(self, frame: "cv2.typing.MatLike") -> List[ObjectDetection]:
-        if self.yolo_detector and self.yolo_detector.ready():
+        if self.yolo_detector is not None and self.yolo_detector.ready():
             return self._detect_objects_yolo(frame)
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         edges = cv2.Canny(gray, 50, 150)
@@ -565,8 +577,11 @@ class PerceptionManager:
         return detections
 
     def _detect_objects_yolo(self, frame: "cv2.typing.MatLike") -> List[ObjectDetection]:
+        detector = self.yolo_detector
+        if detector is None:
+            return []
         detections: List[ObjectDetection] = []
-        for det in self.yolo_detector.detect(frame):
+        for det in detector.detect(frame):
             obj = _map_yolo_label(det)
             if obj is None:
                 continue
@@ -728,7 +743,7 @@ class PerceptionManager:
                 continue
             if best_score < 0.05:
                 continue
-            key = (obj_track.track_id, best_track.track_id)
+            key: Tuple[int, int] = (obj_track.track_id, best_track.track_id)
             last_emit = state.association_last.get(key, 0.0)
             now = time.time()
             if now - last_emit < 2.0:
@@ -789,7 +804,10 @@ class PerceptionManager:
                     self.detection_width, self.detection_height
                 )
                 threshold = frame_diag * h_ratio
-                key = tuple(sorted((t1.track_id, t2.track_id)))
+                if t1.track_id < t2.track_id:
+                    key: Tuple[int, int] = (t1.track_id, t2.track_id)
+                else:
+                    key = (t2.track_id, t1.track_id)
                 close, since, emitted = state.proximity_state.get(
                     key, (False, time.time(), False)
                 )
@@ -849,7 +867,7 @@ class PerceptionManager:
         for group in groups:
             if len(group) < 2:
                 continue
-            member_ids = frozenset(t.track_id for t in group)
+            member_ids: frozenset[int] = frozenset(t.track_id for t in group)
             active_keys.add(member_ids)
             existing = state.group_state.get(member_ids)
             if existing is None:
@@ -1026,7 +1044,9 @@ def _uniform_ratio(
     if crop.size == 0:
         return 0.0
     hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
-    mask = cv2.inRange(hsv, hsv_low, hsv_high)
+    lower = np.array(hsv_low, dtype=np.uint8)
+    upper = np.array(hsv_high, dtype=np.uint8)
+    mask = cv2.inRange(hsv, lower, upper)
     ratio = float(np.mean(mask > 0))
     return ratio
 
@@ -1069,6 +1089,20 @@ def _match_face_to_track(
     if best_iou < 0.05:
         return None
     return best
+
+
+def _get_float(event: Dict[str, object], key: str) -> float:
+    value = event.get(key, 0.0)
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            return float(value)
+        except ValueError:
+            return 0.0
+    return 0.0
+
+
 
 
 def _map_yolo_label(det: YoloDetection) -> Optional[ObjectDetection]:
