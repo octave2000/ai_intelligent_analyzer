@@ -78,7 +78,8 @@ class FaceIdentifier:
             return
 
         try:
-            app = FaceAnalysis(name=self.model_name, root=self.model_root)
+            model_root = self.model_root or ""
+            app = FaceAnalysis(name=self.model_name, root=model_root)
             app.prepare(ctx_id=-1)
             self._app = app
             self._ready = True

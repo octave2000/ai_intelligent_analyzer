@@ -25,9 +25,10 @@ class YoloDetector:
         return self._ready
 
     def detect(self, frame: np.ndarray) -> List[YoloDetection]:
-        if not self._ready:
+        if not self._ready or self._model is None:
             return []
-        results = self._model.predict(
+        model = self._model
+        results = model.predict(
             source=frame,
             conf=self.conf_threshold,
             iou=self.iou_threshold,
@@ -56,4 +57,3 @@ class YoloDetector:
             self._ready = True
         except Exception:
             self._ready = False
-
