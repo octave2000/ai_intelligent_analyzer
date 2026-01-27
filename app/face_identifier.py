@@ -1,6 +1,6 @@
 import os
 from dataclasses import dataclass
-from typing import List, Optional, Tuple
+from typing import Any, List, Optional, Tuple
 
 import cv2
 import numpy as np
@@ -36,7 +36,7 @@ class FaceIdentifier:
         self.similarity_threshold = similarity_threshold
         self.model_name = model_name
         self.model_root = model_root
-        self._app = None
+        self._app: Any = None
         self._roster: List[RosterEntry] = []
         self._ready = False
 
@@ -47,12 +47,15 @@ class FaceIdentifier:
         return self._ready and bool(self._roster)
 
     def detect_and_identify(self, frame: "cv2.typing.MatLike") -> List[FaceMatch]:
-        if not self.ready():
+        if not self.ready() or self._app is None:
             return []
-        faces = self._app.get(frame)
+        app = self._app
+        faces = app.get(frame)
         matches: List[FaceMatch] = []
         for face in faces:
-            bbox = tuple(int(v) for v in face.bbox)
+            bbox = _to_bbox(face.bbox)
+            if bbox is None:
+                continue
             embedding = face.embedding.astype(np.float32)
             person_id, name, role, score = self._match_embedding(embedding)
             matches.append(
@@ -69,7 +72,7 @@ class FaceIdentifier:
 
     def _load_models(self) -> None:
         try:
-            from insightface.app import FaceAnalysis
+            from insightface.app import FaceAnalysis  # type: ignore[import-not-found]
         except Exception:
             self._ready = False
             return
@@ -134,12 +137,13 @@ class FaceIdentifier:
         self._roster = roster
 
     def _embed_image(self, path: str) -> Optional[np.ndarray]:
-        if not self._ready:
+        if not self._ready or self._app is None:
             return None
         image = cv2.imread(path)
         if image is None:
             return None
-        faces = self._app.get(image)
+        app = self._app
+        faces = app.get(image)
         if not faces:
             return None
         embedding = faces[0].embedding.astype(np.float32)
@@ -166,3 +170,13 @@ def _cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
     if denom <= 0:
         return 0.0
     return float(np.dot(a, b) / denom)
+
+
+def _to_bbox(raw: object) -> Optional[Tuple[int, int, int, int]]:
+    try:
+        values = [int(v) for v in raw]  # type: ignore[assignment]
+    except Exception:
+        return None
+    if len(values) != 4:
+        return None
+    return (values[0], values[1], values[2], values[3])
