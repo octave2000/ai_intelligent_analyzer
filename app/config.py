@@ -123,6 +123,7 @@ class Settings:
     overlay_path: str
     overlay_retention_seconds: float
     overlay_flush_interval_seconds: float
+    rtsp_transport: str
     inference_cheating_window_seconds: float
     inference_cheating_emit_interval_seconds: float
     inference_teacher_window_seconds: float
@@ -232,6 +233,7 @@ class Settings:
         self.overlay_flush_interval_seconds = _get_float(
             "OVERLAY_FLUSH_INTERVAL_SECONDS", 1.0
         )
+        self.rtsp_transport = os.getenv("RTSP_TRANSPORT", "tcp").strip().lower()
         self.inference_cheating_window_seconds = _get_float(
             "INFERENCE_CHEATING_WINDOW_SECONDS", 60.0
         )
