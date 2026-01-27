@@ -1,0 +1,106 @@
+import json
+import os
+import threading
+import time
+from collections import deque
+from dataclasses import dataclass, field
+from typing import Deque, Dict, Optional
+
+
+@dataclass
+class OverlayBuffer:
+    events: Deque[Dict[str, object]] = field(default_factory=lambda: deque(maxlen=5000))
+    last_flush: float = 0.0
+
+
+class OverlayStore:
+    def __init__(
+        self,
+        root_path: str,
+        retention_seconds: float = 60.0,
+        flush_interval_seconds: float = 1.0,
+    ) -> None:
+        self.root_path = root_path
+        self.retention_seconds = retention_seconds
+        self.flush_interval_seconds = flush_interval_seconds
+        self._buffers: Dict[str, Dict[str, OverlayBuffer]] = {}
+        self._lock = threading.Lock()
+        self._stop_event = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+
+    def start(self) -> None:
+        if self._thread and self._thread.is_alive():
+            return
+        self._stop_event.clear()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop_event.set()
+        if self._thread and self._thread.is_alive():
+            self._thread.join(timeout=2.0)
+        self._flush_all()
+
+    def add_event(self, room_id: str, camera_id: str, event: Dict[str, object]) -> None:
+        now = time.time()
+        with self._lock:
+            room = self._buffers.setdefault(room_id, {})
+            buf = room.setdefault(camera_id, OverlayBuffer())
+            buf.events.append(event)
+            self._prune_locked(buf, now)
+
+    def _run(self) -> None:
+        while not self._stop_event.is_set():
+            self._flush_due()
+            time.sleep(0.2)
+
+    def _flush_due(self) -> None:
+        now = time.time()
+        to_flush = []
+        with self._lock:
+            for room_id, cameras in self._buffers.items():
+                for camera_id, buf in cameras.items():
+                    self._prune_locked(buf, now)
+                    if now - buf.last_flush >= self.flush_interval_seconds:
+                        buf.last_flush = now
+                        to_flush.append((room_id, camera_id, list(buf.events)))
+        for room_id, camera_id, events in to_flush:
+            self._write_events(room_id, camera_id, events)
+
+    def _flush_all(self) -> None:
+        with self._lock:
+            items = [
+                (room_id, camera_id, list(buf.events))
+                for room_id, cameras in self._buffers.items()
+                for camera_id, buf in cameras.items()
+            ]
+        for room_id, camera_id, events in items:
+            self._write_events(room_id, camera_id, events)
+
+    def _write_events(self, room_id: str, camera_id: str, events: list) -> None:
+        dir_path = os.path.join(self.root_path, room_id)
+        os.makedirs(dir_path, exist_ok=True)
+        file_path = os.path.join(dir_path, f"{camera_id}.jsonl")
+        tmp_path = f"{file_path}.tmp"
+        with open(tmp_path, "w", encoding="utf-8") as handle:
+            for event in events:
+                handle.write(json.dumps(event, separators=(",", ":")))
+                handle.write("\n")
+        os.replace(tmp_path, file_path)
+
+    def _prune_locked(self, buf: OverlayBuffer, now: float) -> None:
+        cutoff = now - self.retention_seconds
+        while buf.events and _get_float(buf.events[0], "timestamp") < cutoff:
+            buf.events.popleft()
+
+
+def _get_float(event: Dict[str, object], key: str) -> float:
+    value = event.get(key, 0.0)
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            return float(value)
+        except ValueError:
+            return 0.0
+    return 0.0

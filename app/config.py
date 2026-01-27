@@ -120,6 +120,9 @@ class Settings:
     yolo_model_path: str
     yolo_conf_threshold: float
     yolo_iou_threshold: float
+    overlay_path: str
+    overlay_retention_seconds: float
+    overlay_flush_interval_seconds: float
     inference_cheating_window_seconds: float
     inference_cheating_emit_interval_seconds: float
     inference_teacher_window_seconds: float
@@ -224,6 +227,11 @@ class Settings:
         self.yolo_model_path = os.getenv("YOLO_MODEL_PATH", "yolov8n.pt")
         self.yolo_conf_threshold = _get_float("YOLO_CONF_THRESHOLD", 0.35)
         self.yolo_iou_threshold = _get_float("YOLO_IOU_THRESHOLD", 0.45)
+        self.overlay_path = os.getenv("OVERLAY_PATH", "data/overlay")
+        self.overlay_retention_seconds = _get_float("OVERLAY_RETENTION_SECONDS", 60.0)
+        self.overlay_flush_interval_seconds = _get_float(
+            "OVERLAY_FLUSH_INTERVAL_SECONDS", 1.0
+        )
         self.inference_cheating_window_seconds = _get_float(
             "INFERENCE_CHEATING_WINDOW_SECONDS", 60.0
         )

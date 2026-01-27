@@ -6,6 +6,7 @@ from app.config import settings
 from app.face_identifier import FaceIdentifier
 from app.inference_manager import InferenceManager
 from app.motion_gate import MotionGateManager
+from app.overlay_store import OverlayStore
 from app.perception_manager import PerceptionManager
 from app.stream_manager import StreamManager
 from app.yolo_detector import YoloDetector
@@ -39,6 +40,11 @@ def create_app() -> FastAPI:
     )
     gate.bootstrap_from_stream_manager()
     attendance = AttendanceManager(storage_path=settings.attendance_path)
+    overlay_store = OverlayStore(
+        root_path=settings.overlay_path,
+        retention_seconds=settings.overlay_retention_seconds,
+        flush_interval_seconds=settings.overlay_flush_interval_seconds,
+    )
     face_identifier = FaceIdentifier(
         roster_path=settings.roster_path,
         similarity_threshold=settings.face_similarity_threshold,
@@ -83,6 +89,7 @@ def create_app() -> FastAPI:
         face_identifier=face_identifier,
         attendance=attendance,
         yolo_detector=yolo_detector,
+        overlay_store=overlay_store,
     )
     perception.bootstrap_from_stream_manager()
     inference = InferenceManager(
@@ -106,12 +113,14 @@ def create_app() -> FastAPI:
         manager.start()
         perception.start()
         inference.start()
+        overlay_store.start()
 
     @app.on_event("shutdown")
     def _shutdown() -> None:
         manager.stop()
         perception.stop()
         inference.stop()
+        overlay_store.stop()
 
     app.include_router(build_router(manager, gate, perception, inference, attendance))
     return app

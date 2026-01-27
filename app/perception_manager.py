@@ -12,6 +12,7 @@ from app.face_identifier import FaceIdentifier, FaceMatch
 from app.motion_gate import MotionGateManager
 from app.attendance_manager import AttendanceManager
 from app.yolo_detector import YoloDetector, YoloDetection
+from app.overlay_store import OverlayStore
 from app.stream_manager import StreamManager
 
 
@@ -163,6 +164,7 @@ class PerceptionManager:
         face_identifier: Optional[FaceIdentifier] = None,
         attendance: Optional[AttendanceManager] = None,
         yolo_detector: Optional[YoloDetector] = None,
+        overlay_store: Optional[OverlayStore] = None,
     ) -> None:
         self.stream_manager = stream_manager
         self.gate = gate
@@ -190,6 +192,7 @@ class PerceptionManager:
         self.face_identifier = face_identifier
         self.attendance = attendance
         self.yolo_detector = yolo_detector
+        self.overlay_store = overlay_store
 
         self._cameras: Dict[str, Dict[str, CameraPerceptionState]] = {}
         self._lock = threading.Lock()
@@ -274,6 +277,11 @@ class PerceptionManager:
 
     def _emit(self, event: Dict[str, object]) -> None:
         self._events.append(event)
+        if self.overlay_store is not None:
+            room_id = event.get("room_id")
+            camera_id = event.get("camera_id")
+            if isinstance(room_id, str) and isinstance(camera_id, str):
+                self.overlay_store.add_event(room_id, camera_id, event)
 
     def _run(self) -> None:
         while not self._stop_event.is_set():
