@@ -6,5 +6,9 @@ data/
 *.jpg
 .DS_Store
 .env
-*.pt
+# Data & models
+data/
 models/
+*.pt
+*.onnx
+*.zip
