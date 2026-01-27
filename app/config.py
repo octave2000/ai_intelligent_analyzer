@@ -1,4 +1,5 @@
 import os
+from typing import Optional
 
 try:
     from dotenv import load_dotenv
@@ -114,7 +115,7 @@ class Settings:
     attendance_path: str
     face_similarity_threshold: float
     face_model_name: str
-    face_model_root: str
+    face_model_root: Optional[str]
     yolo_mode: str
     yolo_model_path: str
     yolo_conf_threshold: float
