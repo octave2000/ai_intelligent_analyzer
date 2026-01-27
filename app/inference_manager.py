@@ -78,7 +78,7 @@ class InferenceManager:
         limit = max(1, min(1000, limit))
         results: List[Dict[str, object]] = []
         for output in reversed(self._outputs):
-            if since is not None and output.get("timestamp", 0.0) <= since:
+            if since is not None and _get_float(output, "timestamp") <= since:
                 continue
             results.append(output)
             if len(results) >= limit:
@@ -90,14 +90,15 @@ class InferenceManager:
         while not self._stop_event.is_set():
             events = self.perception.get_events(since=self._last_ts)
             if events:
-                self._last_ts = max(self._last_ts, max(e.get("timestamp", 0.0) for e in events))
-            for event in events:
-                self._consume_event(event)
+                latest = max(_get_float(e, "timestamp") for e in events)
+                self._last_ts = max(self._last_ts, latest)
+                for event in events:
+                    self._consume_event(event)
             self._evaluate()
             time.sleep(0.5)
 
     def _consume_event(self, event: Dict[str, object]) -> None:
-        global_id = event.get("global_person_id")
+        global_id = _get_int(event, "global_person_id")
         event_type = event.get("event_type")
         if event_type == "role_assigned" and global_id is not None:
             role = event.get("role")
@@ -108,8 +109,8 @@ class InferenceManager:
             window.events.append(event)
 
         if event_type in ("group_formed", "group_updated"):
-            group_id = event.get("group_id")
-            if isinstance(group_id, int):
+            group_id = _get_int(event, "group_id")
+            if group_id is not None:
                 window = self._group_windows.setdefault(group_id, GroupSignalWindow())
                 window.events.append(event)
 
@@ -305,11 +306,15 @@ class InferenceManager:
 
 
 def _filter_recent(events: Deque[Dict[str, object]], since: float) -> List[Dict[str, object]]:
-    return [e for e in events if e.get("timestamp", 0.0) >= since]
+    return [e for e in events if _get_float(e, "timestamp") >= since]
 
 
 def _count_object(events: List[Dict[str, object]], object_type: str) -> int:
-    return sum(1 for e in events if e.get("event_type") == "object_detected" and e.get("object_type") == object_type)
+    return sum(
+        1
+        for e in events
+        if e.get("event_type") == "object_detected" and e.get("object_type") == object_type
+    )
 
 
 def _count_object_association(events: List[Dict[str, object]], types: set) -> int:
@@ -344,7 +349,7 @@ def _count_proximity_close(events: List[Dict[str, object]]) -> int:
         for e in events
         if e.get("event_type") == "proximity_event"
         and e.get("status") == "close"
-        and e.get("duration_seconds", 0.0) >= 2.0
+        and _get_float(e, "duration_seconds") >= 2.0
     )
 
 
@@ -355,11 +360,11 @@ def _count_sync_turns(events: List[Dict[str, object]], window_seconds: float) ->
         if e.get("event_type") == "head_orientation_changed"
         and e.get("orientation") in ("left", "right")
     ]
-    head_events.sort(key=lambda e: e.get("timestamp", 0.0))
+    head_events.sort(key=lambda e: _get_float(e, "timestamp"))
     count = 0
     for i, ev in enumerate(head_events):
         for other in head_events[i + 1 :]:
-            if other.get("timestamp", 0.0) - ev.get("timestamp", 0.0) > window_seconds:
+            if _get_float(other, "timestamp") - _get_float(ev, "timestamp") > window_seconds:
                 break
             if ev.get("orientation") == other.get("orientation"):
                 count += 1
@@ -373,7 +378,10 @@ def _movement_distance(events: List[Dict[str, object]]) -> float:
         if e.get("event_type") in ("person_detected", "person_tracked"):
             bbox = e.get("bbox")
             if isinstance(bbox, (list, tuple)) and len(bbox) == 4:
-                x1, y1, x2, y2 = bbox
+                x1 = _to_float(bbox[0])
+                y1 = _to_float(bbox[1])
+                x2 = _to_float(bbox[2])
+                y2 = _to_float(bbox[3])
                 positions.append(((x1 + x2) / 2.0, (y1 + y2) / 2.0))
     distance = 0.0
     for i in range(1, len(positions)):
@@ -395,7 +403,7 @@ def _count_group_membership(events: List[Dict[str, object]], global_id: int) -> 
 
 def _group_duration(events: List[Dict[str, object]]) -> float:
     durations = [
-        float(e.get("duration_seconds", 0.0))
+        float(_get_float(e, "duration_seconds"))
         for e in events
         if e.get("event_type") in ("group_formed", "group_updated")
     ]
@@ -420,3 +428,33 @@ def _extract_related_ids(events: List[Dict[str, object]], global_id: int) -> Lis
                 if isinstance(gid, int) and gid != global_id:
                     related.add(gid)
     return sorted(related)
+
+
+def _get_float(event: Dict[str, object], key: str) -> float:
+    value = event.get(key, 0.0)
+    return _to_float(value)
+
+
+def _get_int(event: Dict[str, object], key: str) -> Optional[int]:
+    value = event.get(key)
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    if isinstance(value, str):
+        try:
+            return int(value)
+        except ValueError:
+            return None
+    return None
+
+
+def _to_float(value: object) -> float:
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            return float(value)
+        except ValueError:
+            return 0.0
+    return 0.0
