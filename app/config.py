@@ -68,6 +68,48 @@ def _get_int_tuple(name: str, default: tuple) -> tuple:
         return default
 
 
+def _get_str_tuple(name: str, default: tuple) -> tuple:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    parts = [p.strip() for p in raw.split(",") if p.strip()]
+    if not parts:
+        return default
+    return tuple(parts)
+
+
+def _load_object_config(
+    path: str,
+    default_allowlist: tuple,
+    default_priority: tuple,
+    default_risky: tuple,
+) -> tuple:
+    if not path:
+        return default_allowlist, default_priority, default_risky
+    try:
+        import json
+
+        with open(path, "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except Exception:
+        return default_allowlist, default_priority, default_risky
+
+    if not isinstance(payload, dict):
+        return default_allowlist, default_priority, default_risky
+
+    def _read_list(key: str, fallback: tuple) -> tuple:
+        value = payload.get(key)
+        if not isinstance(value, list):
+            return fallback
+        items = [item.strip() for item in value if isinstance(item, str) and item.strip()]
+        return tuple(items) if items else fallback
+
+    allowlist = _read_list("allowlist", default_allowlist)
+    priority = _read_list("priority", default_priority)
+    risky = _read_list("risky", default_risky)
+    return allowlist, priority, risky
+
+
 class Settings:
     frame_width: int
     frame_height: int
@@ -123,7 +165,13 @@ class Settings:
     overlay_path: str
     overlay_retention_seconds: float
     overlay_flush_interval_seconds: float
+    overlay_person_conf_threshold: float
+    overlay_object_conf_threshold: float
     rtsp_transport: str
+    object_allowlist: tuple
+    object_priority: tuple
+    object_risky: tuple
+    object_config_path: str
     inference_cheating_window_seconds: float
     inference_cheating_emit_interval_seconds: float
     inference_teacher_window_seconds: float
@@ -233,7 +281,40 @@ class Settings:
         self.overlay_flush_interval_seconds = _get_float(
             "OVERLAY_FLUSH_INTERVAL_SECONDS", 1.0
         )
+        self.overlay_person_conf_threshold = _get_float(
+            "OVERLAY_PERSON_CONF_THRESHOLD", 0.7
+        )
+        self.overlay_object_conf_threshold = _get_float(
+            "OVERLAY_OBJECT_CONF_THRESHOLD", 0.5
+        )
         self.rtsp_transport = os.getenv("RTSP_TRANSPORT", "tcp").strip().lower()
+        self.object_config_path = os.getenv("OBJECT_CONFIG_PATH", "data/objects.json")
+        allowlist, priority, risky = _load_object_config(
+            self.object_config_path,
+            default_allowlist=(
+                "phone",
+                "laptop",
+                "tablet",
+                "book",
+                "paper",
+                "notebook",
+                "calculator",
+                "knife",
+                "knife_like",
+                "concealed_paper",
+                "beaker",
+                "test_tube",
+                "burner",
+                "backpack",
+                "pouch",
+                "device",
+            ),
+            default_priority=("phone", "knife", "knife_like"),
+            default_risky=("knife", "knife_like", "concealed_paper"),
+        )
+        self.object_allowlist = allowlist
+        self.object_priority = priority
+        self.object_risky = risky
         self.inference_cheating_window_seconds = _get_float(
             "INFERENCE_CHEATING_WINDOW_SECONDS", 60.0
         )

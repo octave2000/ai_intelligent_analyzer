@@ -52,6 +52,8 @@ def create_app() -> FastAPI:
         root_path=settings.overlay_path,
         retention_seconds=settings.overlay_retention_seconds,
         flush_interval_seconds=settings.overlay_flush_interval_seconds,
+        person_conf_threshold=settings.overlay_person_conf_threshold,
+        object_conf_threshold=settings.overlay_object_conf_threshold,
     )
     face_identifier = FaceIdentifier(
         roster_path=settings.roster_path,
@@ -98,6 +100,9 @@ def create_app() -> FastAPI:
         attendance=attendance,
         yolo_detector=yolo_detector,
         overlay_store=overlay_store,
+        object_allowlist=settings.object_allowlist,
+        object_priority=settings.object_priority,
+        object_risky=settings.object_risky,
     )
     perception.bootstrap_from_stream_manager()
     inference = InferenceManager(

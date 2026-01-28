@@ -167,6 +167,9 @@ class PerceptionManager:
         attendance: Optional[AttendanceManager] = None,
         yolo_detector: Optional[YoloDetector] = None,
         overlay_store: Optional[OverlayStore] = None,
+        object_allowlist: Tuple[str, ...] = (),
+        object_priority: Tuple[str, ...] = (),
+        object_risky: Tuple[str, ...] = (),
     ) -> None:
         self.stream_manager = stream_manager
         self.gate = gate
@@ -195,6 +198,9 @@ class PerceptionManager:
         self.attendance = attendance
         self.yolo_detector = yolo_detector
         self.overlay_store = overlay_store
+        self.object_allowlist = set(object_allowlist)
+        self.object_priority = set(object_priority)
+        self.object_risky = set(object_risky)
 
         self._cameras: Dict[str, Dict[str, CameraPerceptionState]] = {}
         self._lock = threading.Lock()
@@ -633,6 +639,8 @@ class PerceptionManager:
             obj = self._classify_object(area_ratio, aspect, mean_val)
             if obj is None:
                 continue
+            if not self._object_allowed(obj.object_type):
+                continue
             obj.bbox = (x, y, x + rw, y + rh)
             detections.append(obj)
         return detections
@@ -645,6 +653,8 @@ class PerceptionManager:
         for det in detector.detect(frame):
             obj = _map_yolo_label(det)
             if obj is None:
+                continue
+            if not self._object_allowed(obj.object_type):
                 continue
             obj.bbox = det.bbox
             detections.append(obj)
@@ -771,18 +781,21 @@ class PerceptionManager:
         for track in tracks.values():
             if track.hits >= self.object_persist_frames and not track.emitted:
                 track.emitted = True
+                detection = self._apply_object_flags(track.detection)
                 self._emit(
                     _event(
                         state,
                         "object_detected",
-                        track.detection.confidence,
+                        detection.confidence,
                         None,
                         {
-                            "object_type": track.detection.object_type,
-                            "category": track.detection.category,
-                            "risk_level": track.detection.risk_level,
-                            "bbox": track.detection.bbox,
+                            "object_type": detection.object_type,
+                            "category": detection.category,
+                            "risk_level": detection.risk_level,
+                            "bbox": detection.bbox,
                             "object_track_id": track.track_id,
+                            "priority": detection.object_type in self.object_priority,
+                            "risky": detection.object_type in self.object_risky,
                         },
                     )
                 )
@@ -810,18 +823,21 @@ class PerceptionManager:
             if now - last_emit < 2.0:
                 continue
             state.association_last[key] = now
+            detection = self._apply_object_flags(obj_track.detection)
             self._emit(
                 _event(
                     state,
                     "object_associated",
-                    min(0.9, obj_track.detection.confidence + 0.2),
+                    min(0.9, detection.confidence + 0.2),
                     best_track.global_id,
                     {
                         "track_id": best_track.track_id,
                         "object_track_id": obj_track.track_id,
-                        "object_type": obj_track.detection.object_type,
-                        "category": obj_track.detection.category,
-                        "risk_level": obj_track.detection.risk_level,
+                        "object_type": detection.object_type,
+                        "category": detection.category,
+                        "risk_level": detection.risk_level,
+                        "priority": detection.object_type in self.object_priority,
+                        "risky": detection.object_type in self.object_risky,
                     },
                 )
             )
@@ -836,6 +852,8 @@ class PerceptionManager:
             if area <= 0:
                 continue
             if area < 3000:
+                if not self._object_allowed("concealed_paper"):
+                    continue
                 self._emit(
                     _event(
                         state,
@@ -847,6 +865,8 @@ class PerceptionManager:
                             "category": "suspicious",
                             "risk_level": "medium",
                             "bbox": obj_track.detection.bbox,
+                            "priority": "concealed_paper" in self.object_priority,
+                            "risky": "concealed_paper" in self.object_risky,
                         },
                     )
                 )
@@ -973,6 +993,22 @@ class PerceptionManager:
         for key in list(state.group_state.keys()):
             if key not in active_keys:
                 state.group_state.pop(key, None)
+
+    def _object_allowed(self, object_type: str) -> bool:
+        if not self.object_allowlist:
+            return True
+        return object_type in self.object_allowlist
+
+    def _apply_object_flags(self, detection: ObjectDetection) -> ObjectDetection:
+        if detection.object_type in self.object_risky and detection.risk_level != "high":
+            detection = ObjectDetection(
+                object_type=detection.object_type,
+                category=detection.category,
+                risk_level="high",
+                confidence=detection.confidence,
+                bbox=detection.bbox,
+            )
+        return detection
 
 
 def _event(

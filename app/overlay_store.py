@@ -22,6 +22,8 @@ class OverlayStore:
         root_path: str,
         retention_seconds: float = 60.0,
         flush_interval_seconds: float = 1.0,
+        person_conf_threshold: float = 0.7,
+        object_conf_threshold: float = 0.5,
     ) -> None:
         self.root_path = root_path
         self.retention_seconds = retention_seconds
@@ -30,6 +32,8 @@ class OverlayStore:
         self._lock = threading.Lock()
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
+        self._person_conf_threshold = max(0.0, min(1.0, person_conf_threshold))
+        self._object_conf_threshold = max(0.0, min(1.0, object_conf_threshold))
 
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
@@ -46,6 +50,8 @@ class OverlayStore:
 
     def add_event(self, room_id: str, camera_id: str, event: Dict[str, object]) -> None:
         now = time.time()
+        if not self._should_store_event(event):
+            return
         with self._lock:
             room = self._buffers.setdefault(room_id, {})
             buf = room.setdefault(camera_id, OverlayBuffer())
@@ -87,27 +93,42 @@ class OverlayStore:
             self._write_events(room_id, camera_id, events)
 
     def _write_events(self, room_id: str, camera_id: str, events: list) -> None:
-        dir_path = os.path.join(self.root_path, room_id)
+        dir_path = os.path.join(self.root_path, room_id, camera_id)
         os.makedirs(dir_path, exist_ok=True)
-        file_path = os.path.join(dir_path, f"{camera_id}.jsonl")
-        tmp_path = f"{file_path}.tmp"
-        with open(tmp_path, "w", encoding="utf-8") as handle:
-            for event in events:
-                handle.write(json.dumps(event, separators=(",", ":")))
-                handle.write("\n")
-        os.replace(tmp_path, file_path)
-        logger.info(
-            "overlay_store.flush room_id=%s camera_id=%s events=%d path=%s",
-            room_id,
-            camera_id,
-            len(events),
-            file_path,
-        )
+        grouped: Dict[int, list] = {}
+        for event in events:
+            ts = int(_get_float(event, "timestamp"))
+            grouped.setdefault(ts, []).append(event)
+        for ts, bucket in grouped.items():
+            file_path = os.path.join(dir_path, f"{ts}.jsonl")
+            tmp_path = f"{file_path}.tmp"
+            with open(tmp_path, "w", encoding="utf-8") as handle:
+                for event in bucket:
+                    handle.write(json.dumps(event, separators=(",", ":")))
+                    handle.write("\n")
+            os.replace(tmp_path, file_path)
+            logger.info(
+                "overlay_store.flush room_id=%s camera_id=%s ts=%s events=%d path=%s",
+                room_id,
+                camera_id,
+                ts,
+                len(bucket),
+                file_path,
+            )
 
     def _prune_locked(self, buf: OverlayBuffer, now: float) -> None:
         cutoff = now - self.retention_seconds
         while buf.events and _get_float(buf.events[0], "timestamp") < cutoff:
             buf.events.popleft()
+
+    def _should_store_event(self, event: Dict[str, object]) -> bool:
+        event_type = event.get("event_type")
+        confidence = _get_float(event, "confidence")
+        if isinstance(event_type, str) and event_type.startswith("person_"):
+            return confidence >= self._person_conf_threshold
+        if event_type in ("object_detected", "object_associated"):
+            return confidence >= self._object_conf_threshold
+        return True
 
 
 def _get_float(event: Dict[str, object], key: str) -> float:
