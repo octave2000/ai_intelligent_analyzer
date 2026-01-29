@@ -83,6 +83,10 @@ class CameraPerceptionState:
     group_state: Dict[frozenset, Tuple[int, float, bool]] = field(default_factory=dict)
     next_group_id: int = 1
     association_last: Dict[Tuple[int, int], float] = field(default_factory=dict)
+    last_attempt_at: float = 0.0
+    last_processed_at: float = 0.0
+    last_processing_ms: float = 0.0
+    last_error: Optional[str] = None
 
 
 class GlobalIdentityResolver:
@@ -164,6 +168,7 @@ class PerceptionManager:
         detection_width: int,
         detection_height: int,
         exam_mode: bool,
+        max_cameras_per_tick: int,
         face_identifier: Optional[FaceIdentifier] = None,
         attendance: Optional[AttendanceManager] = None,
         yolo_detector: Optional[YoloDetector] = None,
@@ -196,6 +201,7 @@ class PerceptionManager:
         self.detection_width = detection_width
         self.detection_height = detection_height
         self.exam_mode = exam_mode
+        self.max_cameras_per_tick = max(1, max_cameras_per_tick)
         self.face_identifier = face_identifier
         self.attendance = attendance
         self.yolo_detector = yolo_detector
@@ -213,6 +219,8 @@ class PerceptionManager:
             similarity_threshold=global_similarity_threshold,
             max_age_seconds=global_max_age_seconds,
         )
+        self._camera_order: List[Tuple[str, str]] = []
+        self._camera_index = 0
         self._hog = cv2.HOGDescriptor()
         detector_fn = getattr(cv2, "HOGDescriptor_getDefaultPeopleDetector", None)
         if detector_fn is not None:
@@ -245,6 +253,7 @@ class PerceptionManager:
             if camera_id in room:
                 return
             room[camera_id] = CameraPerceptionState(room_id=room_id, camera_id=camera_id)
+            self._refresh_camera_order_locked()
 
     def remove_camera(self, room_id: str, camera_id: str) -> None:
         with self._lock:
@@ -254,10 +263,12 @@ class PerceptionManager:
             room.pop(camera_id, None)
             if not room:
                 self._cameras.pop(room_id, None)
+            self._refresh_camera_order_locked()
 
     def remove_room(self, room_id: str) -> None:
         with self._lock:
             self._cameras.pop(room_id, None)
+            self._refresh_camera_order_locked()
 
     def get_events(
         self,
@@ -285,6 +296,43 @@ class PerceptionManager:
         results.reverse()
         return results
 
+    def health(self) -> Dict[str, object]:
+        with self._lock:
+            room_items = list(self._cameras.items())
+            event_count = len(self._events)
+        rooms: Dict[str, object] = {}
+        total_cameras = 0
+        for room_id, cameras in room_items:
+            cam_payload: Dict[str, object] = {}
+            for camera_id, state in cameras.items():
+                with state.lock:
+                    cam_payload[camera_id] = {
+                        "last_attempt_at": state.last_attempt_at,
+                        "last_processed_at": state.last_processed_at,
+                        "last_processing_ms": state.last_processing_ms,
+                        "last_error": state.last_error,
+                        "tracks": len(state.tracks),
+                        "object_tracks": len(state.object_tracks),
+                    }
+            rooms[room_id] = {"cameras": cam_payload}
+            total_cameras += len(cameras)
+        return {
+            "event_queue_size": event_count,
+            "camera_count": total_cameras,
+            "rooms": rooms,
+        }
+
+    def _refresh_camera_order_locked(self) -> None:
+        self._camera_order = [
+            (room_id, camera_id)
+            for room_id, cameras in self._cameras.items()
+            for camera_id in cameras.keys()
+        ]
+        if self._camera_order:
+            self._camera_index %= len(self._camera_order)
+        else:
+            self._camera_index = 0
+
     def _emit(self, event: Dict[str, object]) -> None:
         self._events.append(event)
         logger.info(
@@ -302,101 +350,150 @@ class PerceptionManager:
     def _run(self) -> None:
         while not self._stop_event.is_set():
             with self._lock:
-                room_items = list(self._cameras.items())
+                camera_order = list(self._camera_order)
+                start_index = self._camera_index
 
             now = time.monotonic()
-            for room_id, cameras in room_items:
-                for camera_id, state in cameras.items():
-                    gate_info = self.gate.activity(room_id, camera_id)
-                    if gate_info is None:
-                        logger.debug(
-                            "perception.gate_missing room_id=%s camera_id=%s",
-                            room_id,
-                            camera_id,
-                        )
-                        continue
-                    gate_state = gate_info.get("activity_state")
-                    if not isinstance(gate_state, str) or gate_state not in ("IDLE", "ACTIVE", "SPIKE"):
-                        logger.debug(
-                            "perception.gate_invalid room_id=%s camera_id=%s gate_state=%s",
-                            room_id,
-                            camera_id,
-                            gate_state,
-                        )
-                        continue
-                    interval = self.active_interval_seconds
-                    if gate_state == "IDLE":
-                        if self.idle_heartbeat_seconds <= 0:
-                            continue
-                        interval = self.idle_heartbeat_seconds
-                    if gate_state == "SPIKE":
-                        if state.last_spike_time is None:
-                            state.last_spike_time = now
-                        if state.last_spike_time is not None and now - state.last_spike_time <= self.spike_burst_seconds:
-                            interval = self.spike_interval_seconds
-                    if now - state.last_run < interval:
-                        continue
-                    state.last_run = now
+            processed = 0
+            checked = 0
+            total = len(camera_order)
+            idx = start_index
+            while checked < total and processed < self.max_cameras_per_tick:
+                room_id, camera_id = camera_order[idx]
+                idx = (idx + 1) % total
+                checked += 1
+                with self._lock:
+                    state = self._cameras.get(room_id, {}).get(camera_id)
+                if state is None:
+                    continue
+                gate_info = self.gate.activity(room_id, camera_id)
+                if gate_info is None:
                     logger.debug(
-                        "perception.process_start room_id=%s camera_id=%s gate_state=%s",
+                        "perception.gate_missing room_id=%s camera_id=%s",
+                        room_id,
+                        camera_id,
+                    )
+                    continue
+                gate_state = gate_info.get("activity_state")
+                if not isinstance(gate_state, str) or gate_state not in ("IDLE", "ACTIVE", "SPIKE"):
+                    logger.debug(
+                        "perception.gate_invalid room_id=%s camera_id=%s gate_state=%s",
                         room_id,
                         camera_id,
                         gate_state,
                     )
-                    self._process_camera(state)
+                    continue
+                interval = self.active_interval_seconds
+                if gate_state == "IDLE":
+                    if self.idle_heartbeat_seconds <= 0:
+                        continue
+                    interval = self.idle_heartbeat_seconds
+                if gate_state == "SPIKE":
+                    if state.last_spike_time is None:
+                        state.last_spike_time = now
+                    if state.last_spike_time is not None and now - state.last_spike_time <= self.spike_burst_seconds:
+                        interval = self.spike_interval_seconds
+                if now - state.last_run < interval:
+                    continue
+                state.last_run = now
+                logger.debug(
+                    "perception.process_start room_id=%s camera_id=%s gate_state=%s",
+                    room_id,
+                    camera_id,
+                    gate_state,
+                )
+                self._process_camera(state)
+                processed += 1
+            with self._lock:
+                if total > 0:
+                    self._camera_index = idx
 
             time.sleep(0.1)
 
     def _process_camera(self, state: CameraPerceptionState) -> None:
-        frame, ts = self.stream_manager.get_snapshot(state.room_id, state.camera_id)
-        if frame is None or ts is None:
-            logger.debug(
-                "perception.frame_missing room_id=%s camera_id=%s",
-                state.room_id,
-                state.camera_id,
-            )
-            return
-        if time.time() - ts > self.stale_seconds:
-            logger.debug(
-                "perception.frame_stale room_id=%s camera_id=%s",
-                state.room_id,
-                state.camera_id,
-            )
-            return
-
-        faces: List[FaceMatch] = []
-        if self.face_identifier and self.face_identifier.ready():
-            try:
-                faces = self.face_identifier.detect_and_identify(frame)
-            except Exception:
-                faces = []
-        logger.debug(
-            "perception.detect_faces room_id=%s camera_id=%s faces=%d",
-            state.room_id,
-            state.camera_id,
-            len(faces),
-        )
-
-        detections = self._detect_people(frame)
-        logger.debug(
-            "perception.detect_people room_id=%s camera_id=%s count=%d",
-            state.room_id,
-            state.camera_id,
-            len(detections),
-        )
+        start = time.time()
+        success = False
+        error: Optional[str] = None
         with state.lock:
-            self._update_tracks(state, frame, detections, faces)
-            objects = self._detect_objects(frame)
+            state.last_attempt_at = start
+        try:
+            frame, ts = self.stream_manager.get_snapshot(state.room_id, state.camera_id)
+            if frame is None or ts is None:
+                logger.debug(
+                    "perception.frame_missing room_id=%s camera_id=%s",
+                    state.room_id,
+                    state.camera_id,
+                )
+                error = "frame_missing"
+                return
+            if time.time() - ts > self.stale_seconds:
+                logger.debug(
+                    "perception.frame_stale room_id=%s camera_id=%s",
+                    state.room_id,
+                    state.camera_id,
+                )
+                error = "frame_stale"
+                return
+
+            faces: List[FaceMatch] = []
+            if self.face_identifier and self.face_identifier.ready():
+                try:
+                    faces = self.face_identifier.detect_and_identify(frame)
+                except Exception:
+                    faces = []
             logger.debug(
-                "perception.detect_objects room_id=%s camera_id=%s count=%d",
+                "perception.detect_faces room_id=%s camera_id=%s faces=%d",
                 state.room_id,
                 state.camera_id,
-                len(objects),
+                len(faces),
             )
-            self._update_object_tracks(state, objects)
-            self._associate_objects(state)
-            self._update_proximity(state)
-            self._update_groups(state)
+
+            detections = self._detect_people(frame)
+            logger.debug(
+                "perception.detect_people room_id=%s camera_id=%s count=%d",
+                state.room_id,
+                state.camera_id,
+                len(detections),
+            )
+            with state.lock:
+                self._update_tracks(state, frame, detections, faces)
+                objects = self._detect_objects(frame)
+                logger.debug(
+                    "perception.detect_objects room_id=%s camera_id=%s count=%d",
+                    state.room_id,
+                    state.camera_id,
+                    len(objects),
+                )
+                self._update_object_tracks(state, objects)
+                self._associate_objects(state)
+                self._update_proximity(state)
+                self._update_groups(state)
+            success = True
+        except Exception as exc:
+            error = f"exception:{exc}"
+            logger.exception(
+                "perception.process_failed room_id=%s camera_id=%s",
+                state.room_id,
+                state.camera_id,
+            )
+        finally:
+            self._update_processing_stats(state, start, success, error)
+
+    @staticmethod
+    def _update_processing_stats(
+        state: CameraPerceptionState,
+        start: float,
+        success: bool,
+        error: Optional[str],
+    ) -> None:
+        end = time.time()
+        with state.lock:
+            state.last_processing_ms = (end - start) * 1000.0
+            if success:
+                state.last_processed_at = end
+                state.last_error = None
+            else:
+                state.last_error = error
 
     def _detect_people(self, frame: "cv2.typing.MatLike") -> List[Detection]:
         detector = self.yolo_detector

@@ -176,6 +176,7 @@ class Settings:
     perception_detection_width: int
     perception_detection_height: int
     perception_exam_mode: bool
+    perception_max_cameras_per_tick: int
     roster_path: str
     attendance_path: str
     face_similarity_threshold: float
@@ -190,6 +191,8 @@ class Settings:
     overlay_flush_interval_seconds: float
     overlay_person_conf_threshold: float
     overlay_object_conf_threshold: float
+    overlay_disk_retention_seconds: float
+    overlay_cleanup_interval_seconds: float
     rtsp_transport: str
     object_allowlist: tuple
     object_priority: tuple
@@ -291,6 +294,9 @@ class Settings:
         )
         self.perception_detection_width = _get_int("PERCEPTION_DETECTION_WIDTH", 640)
         self.perception_detection_height = _get_int("PERCEPTION_DETECTION_HEIGHT", 360)
+        self.perception_max_cameras_per_tick = _get_int(
+            "PERCEPTION_MAX_CAMERAS_PER_TICK", 8
+        )
         self.mode_config_path = "data/modes.json"
         self.perception_exam_mode = _load_mode_config(
             self.mode_config_path, default_exam_mode=False
@@ -316,6 +322,12 @@ class Settings:
         )
         self.overlay_object_conf_threshold = _get_float(
             "OVERLAY_OBJECT_CONF_THRESHOLD", 0.5
+        )
+        self.overlay_disk_retention_seconds = _get_float(
+            "OVERLAY_DISK_RETENTION_SECONDS", 86400.0
+        )
+        self.overlay_cleanup_interval_seconds = _get_float(
+            "OVERLAY_CLEANUP_INTERVAL_SECONDS", 60.0
         )
         self.rtsp_transport = os.getenv("RTSP_TRANSPORT", "tcp").strip().lower()
         self.object_config_path = os.getenv("OBJECT_CONFIG_PATH", "data/objects.json")

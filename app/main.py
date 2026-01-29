@@ -54,6 +54,8 @@ def create_app() -> FastAPI:
         flush_interval_seconds=settings.overlay_flush_interval_seconds,
         person_conf_threshold=settings.overlay_person_conf_threshold,
         object_conf_threshold=settings.overlay_object_conf_threshold,
+        disk_retention_seconds=settings.overlay_disk_retention_seconds,
+        cleanup_interval_seconds=settings.overlay_cleanup_interval_seconds,
     )
     face_identifier = FaceIdentifier(
         roster_path=settings.roster_path,
@@ -70,6 +72,16 @@ def create_app() -> FastAPI:
         )
         if yolo_candidate.ready() or settings.yolo_mode == "force":
             yolo_detector = yolo_candidate
+    if yolo_detector is None:
+        logging.getLogger(__name__).info(
+            "yolo_detector.disabled mode=%s", settings.yolo_mode
+        )
+    else:
+        logging.getLogger(__name__).info(
+            "yolo_detector.enabled mode=%s model_path=%s",
+            settings.yolo_mode,
+            settings.yolo_model_path,
+        )
     perception = PerceptionManager(
         stream_manager=manager,
         gate=gate,
@@ -97,6 +109,7 @@ def create_app() -> FastAPI:
         detection_width=settings.perception_detection_width,
         detection_height=settings.perception_detection_height,
         exam_mode=settings.perception_exam_mode,
+        max_cameras_per_tick=settings.perception_max_cameras_per_tick,
         face_identifier=face_identifier,
         attendance=attendance,
         yolo_detector=yolo_detector,
@@ -136,7 +149,16 @@ def create_app() -> FastAPI:
         inference.stop()
         overlay_store.stop()
 
-    app.include_router(build_router(manager, gate, perception, inference, attendance))
+    app.include_router(
+        build_router(
+            manager,
+            gate,
+            perception,
+            inference,
+            attendance,
+            yolo_detector,
+        )
+    )
     return app
 
 

@@ -94,6 +94,13 @@ class InferenceManager:
         results.reverse()
         return results
 
+    def health(self) -> Dict[str, object]:
+        return {
+            "output_queue_size": len(self._outputs),
+            "people_windows": len(self._people),
+            "group_windows": len(self._group_windows),
+        }
+
     def _run(self) -> None:
         while not self._stop_event.is_set():
             events = self.perception.get_events(since=self._last_ts)

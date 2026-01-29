@@ -10,6 +10,7 @@ from app.motion_gate import MotionGateManager
 from app.perception_manager import PerceptionManager
 from app.stream_manager import StreamManager
 from app.attendance_manager import AttendanceManager
+from app.yolo_detector import YoloDetector
 
 
 def _encode_jpeg(frame: "cv2.typing.MatLike") -> Optional[bytes]:
@@ -25,6 +26,7 @@ def build_router(
     perception: PerceptionManager,
     inference: InferenceManager,
     attendance: AttendanceManager,
+    yolo_detector: Optional[YoloDetector],
 ) -> APIRouter:
     router = APIRouter()
 
@@ -38,7 +40,15 @@ def build_router(
 
     @router.get("/health")
     def health() -> dict:
-        return manager.health()
+        payload = manager.health()
+        payload["yolo"] = {
+            "enabled": yolo_detector is not None,
+            "ready": yolo_detector.ready() if yolo_detector is not None else False,
+            "model_path": yolo_detector.model_path if yolo_detector is not None else None,
+        }
+        payload["perception"] = perception.health()
+        payload["inference"] = inference.health()
+        return payload
 
     @router.get("/rooms")
     def list_rooms() -> dict:
@@ -153,6 +163,11 @@ def build_router(
         return {
             "timestamp": now,
             "health": manager.health(),
+            "yolo": {
+                "enabled": yolo_detector is not None,
+                "ready": yolo_detector.ready() if yolo_detector is not None else False,
+                "model_path": yolo_detector.model_path if yolo_detector is not None else None,
+            },
             "activity": gate.all_activity(),
             "attendance": {
                 "date": date_key,

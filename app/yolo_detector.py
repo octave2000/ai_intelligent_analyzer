@@ -1,7 +1,10 @@
+import logging
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
 import numpy as np
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -48,6 +51,7 @@ class YoloDetector:
         try:
             from ultralytics import YOLO
         except Exception:
+            logger.warning("yolo_detector.unavailable reason=import_failed")
             self._ready = False
             return
         try:
@@ -55,5 +59,7 @@ class YoloDetector:
             self._model = model
             self._names = list(model.names.values()) if isinstance(model.names, dict) else list(model.names)
             self._ready = True
+            logger.info("yolo_detector.ready model_path=%s labels=%d", self.model_path, len(self._names))
         except Exception:
+            logger.warning("yolo_detector.unavailable reason=load_failed model_path=%s", self.model_path)
             self._ready = False
