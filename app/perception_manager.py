@@ -143,6 +143,7 @@ class PerceptionManager:
         active_interval_seconds: float,
         spike_interval_seconds: float,
         spike_burst_seconds: float,
+        idle_heartbeat_seconds: float,
         stale_seconds: float,
         track_ttl_seconds: float,
         object_ttl_seconds: float,
@@ -176,6 +177,7 @@ class PerceptionManager:
         self.active_interval_seconds = active_interval_seconds
         self.spike_interval_seconds = spike_interval_seconds
         self.spike_burst_seconds = spike_burst_seconds
+        self.idle_heartbeat_seconds = idle_heartbeat_seconds
         self.stale_seconds = stale_seconds
         self.track_ttl_seconds = track_ttl_seconds
         self.object_ttl_seconds = object_ttl_seconds
@@ -322,9 +324,11 @@ class PerceptionManager:
                             gate_state,
                         )
                         continue
-                    if gate_state == "IDLE":
-                        continue
                     interval = self.active_interval_seconds
+                    if gate_state == "IDLE":
+                        if self.idle_heartbeat_seconds <= 0:
+                            continue
+                        interval = self.idle_heartbeat_seconds
                     if gate_state == "SPIKE":
                         if state.last_spike_time is None:
                             state.last_spike_time = now
@@ -591,6 +595,8 @@ class PerceptionManager:
             )
 
     def _update_orientation(self, state: CameraPerceptionState, track: TrackState) -> None:
+        if not self.exam_mode:
+            return
         if len(track.history) < 2:
             return
         (x1, y1), (x2, y2) = track.history[-2], track.history[-1]

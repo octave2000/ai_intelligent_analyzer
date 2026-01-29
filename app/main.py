@@ -76,6 +76,7 @@ def create_app() -> FastAPI:
         active_interval_seconds=settings.perception_active_interval_seconds,
         spike_interval_seconds=settings.perception_spike_interval_seconds,
         spike_burst_seconds=settings.perception_spike_burst_seconds,
+        idle_heartbeat_seconds=settings.perception_idle_heartbeat_seconds,
         stale_seconds=settings.perception_stale_seconds,
         track_ttl_seconds=settings.perception_track_ttl_seconds,
         object_ttl_seconds=settings.perception_object_ttl_seconds,

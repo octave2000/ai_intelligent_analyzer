@@ -110,6 +110,28 @@ def _load_object_config(
     return allowlist, priority, risky
 
 
+def _load_mode_config(path: str, default_exam_mode: bool) -> bool:
+    if not path:
+        return default_exam_mode
+    try:
+        import json
+
+        with open(path, "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except Exception:
+        return default_exam_mode
+    if not isinstance(payload, dict):
+        return default_exam_mode
+    value = payload.get("exam_mode", default_exam_mode)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in ("1", "true", "yes", "on")
+    if isinstance(value, (int, float)):
+        return bool(value)
+    return default_exam_mode
+
+
 class Settings:
     frame_width: int
     frame_height: int
@@ -133,6 +155,7 @@ class Settings:
     perception_active_interval_seconds: float
     perception_spike_interval_seconds: float
     perception_spike_burst_seconds: float
+    perception_idle_heartbeat_seconds: float
     perception_stale_seconds: float
     perception_track_ttl_seconds: float
     perception_object_ttl_seconds: float
@@ -172,6 +195,7 @@ class Settings:
     object_priority: tuple
     object_risky: tuple
     object_config_path: str
+    mode_config_path: str
     inference_cheating_window_seconds: float
     inference_cheating_emit_interval_seconds: float
     inference_teacher_window_seconds: float
@@ -216,6 +240,9 @@ class Settings:
         )
         self.perception_spike_burst_seconds = _get_float(
             "PERCEPTION_SPIKE_BURST_SECONDS", 3.0
+        )
+        self.perception_idle_heartbeat_seconds = _get_float(
+            "PERCEPTION_IDLE_HEARTBEAT_SECONDS", 30.0
         )
         self.perception_stale_seconds = _get_float("PERCEPTION_STALE_SECONDS", 2.5)
         self.perception_track_ttl_seconds = _get_float("PERCEPTION_TRACK_TTL_SECONDS", 2.5)
@@ -264,7 +291,10 @@ class Settings:
         )
         self.perception_detection_width = _get_int("PERCEPTION_DETECTION_WIDTH", 640)
         self.perception_detection_height = _get_int("PERCEPTION_DETECTION_HEIGHT", 360)
-        self.perception_exam_mode = _get_bool("EXAM_MODE", False)
+        self.mode_config_path = "data/modes.json"
+        self.perception_exam_mode = _load_mode_config(
+            self.mode_config_path, default_exam_mode=False
+        )
         self.roster_path = os.getenv("ROSTER_PATH", "data/roster.json")
         self.attendance_path = os.getenv("ATTENDANCE_PATH", "data/attendance.json")
         self.face_similarity_threshold = _get_float(

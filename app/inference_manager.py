@@ -17,6 +17,9 @@ class PersonSignalWindow:
     last_teacher_output: float = 0.0
     last_participation_output: float = 0.0
     last_fight_output: float = 0.0
+    last_interaction_output: float = 0.0
+    last_absence_output: float = 0.0
+    last_paper_output: float = 0.0
 
 
 @dataclass
@@ -61,9 +64,11 @@ class InferenceManager:
         self._last_ts: float = 0.0
         self._people: Dict[int, PersonSignalWindow] = {}
         self._roles: Dict[int, str] = {}
+        self._last_seen: Dict[int, float] = {}
         self._outputs: Deque[Dict[str, object]] = deque(maxlen=2000)
         self._group_windows: Dict[int, GroupSignalWindow] = {}
         self._lock = threading.Lock()
+        self._teacher_absence_threshold_seconds = 30.0
 
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
@@ -108,6 +113,8 @@ class InferenceManager:
             event_type,
             global_id,
         )
+        if global_id is not None and event_type in ("person_detected", "person_tracked"):
+            self._last_seen[global_id] = _get_float(event, "timestamp") or time.time()
         if event_type == "role_assigned" and global_id is not None:
             role = event.get("role")
             if isinstance(role, str):
@@ -128,8 +135,11 @@ class InferenceManager:
             role = self._roles.get(global_id, "unknown")
             if self.exam_mode and role == "student":
                 self._maybe_emit_cheating(global_id, window, now)
+                self._maybe_emit_paper_interaction(global_id, window, now)
             if role == "teacher":
                 self._maybe_emit_teacher(global_id, window, now)
+                self._maybe_emit_teacher_interaction(global_id, window, now)
+                self._maybe_emit_teacher_absence(global_id, window, now)
             if role == "student":
                 self._maybe_emit_participation(global_id, window, now)
             self._maybe_emit_fight(global_id, window, now)
@@ -278,6 +288,106 @@ class InferenceManager:
             level,
         )
 
+    def _maybe_emit_teacher_interaction(self, global_id: int, window: PersonSignalWindow, now: float) -> None:
+        if now - window.last_interaction_output < self.teacher_emit_interval_seconds:
+            return
+        recent = _filter_recent(window.events, now - self.teacher_window_seconds)
+        if not recent:
+            return
+        student_ids = set()
+        best_duration = 0.0
+        for e in recent:
+            if e.get("event_type") != "proximity_event" or e.get("status") != "close":
+                continue
+            gids = e.get("global_ids")
+            if not isinstance(gids, list) or global_id not in gids:
+                continue
+            for gid in gids:
+                if gid == global_id:
+                    continue
+                if self._roles.get(gid) == "student":
+                    student_ids.add(gid)
+            best_duration = max(best_duration, _get_float(e, "duration_seconds"))
+        if not student_ids:
+            return
+        confidence = min(1.0, 0.4 + min(0.6, best_duration / 10.0))
+        output = {
+            "timestamp": now,
+            "type": "teacher_student_interaction",
+            "teacher_global_id": global_id,
+            "student_global_ids": sorted(student_ids),
+            "duration_seconds": best_duration,
+            "confidence": confidence,
+            "time_window": self.teacher_window_seconds,
+        }
+        window.last_interaction_output = now
+        self._outputs.append(output)
+        logger.info(
+            "inference.output type=%s teacher_global_id=%s students=%d",
+            output.get("type"),
+            global_id,
+            len(student_ids),
+        )
+
+    def _maybe_emit_teacher_absence(self, global_id: int, window: PersonSignalWindow, now: float) -> None:
+        if now - window.last_absence_output < self.teacher_emit_interval_seconds:
+            return
+        last_seen = self._last_seen.get(global_id)
+        if last_seen is None:
+            return
+        absence = now - last_seen
+        if absence < self._teacher_absence_threshold_seconds:
+            return
+        output = {
+            "timestamp": now,
+            "type": "teacher_absence",
+            "teacher_global_id": global_id,
+            "absence_seconds": absence,
+            "confidence": min(1.0, 0.4 + min(0.6, absence / 120.0)),
+            "time_window": self.teacher_window_seconds,
+        }
+        window.last_absence_output = now
+        self._outputs.append(output)
+        logger.info(
+            "inference.output type=%s teacher_global_id=%s absence=%.1fs",
+            output.get("type"),
+            global_id,
+            absence,
+        )
+
+    def _maybe_emit_paper_interaction(self, global_id: int, window: PersonSignalWindow, now: float) -> None:
+        if now - window.last_paper_output < self.cheating_emit_interval_seconds:
+            return
+        recent = _filter_recent(window.events, now - self.cheating_window_seconds)
+        if not recent:
+            return
+        has_paper = any(
+            e.get("event_type") == "object_associated"
+            and e.get("object_type") in ("paper", "notebook", "book", "concealed_paper")
+            for e in recent
+        )
+        if not has_paper:
+            return
+        related = _extract_related_ids(recent, global_id)
+        if not related:
+            return
+        output = {
+            "timestamp": now,
+            "type": "paper_interaction",
+            "student_global_id": global_id,
+            "related_global_ids": related,
+            "confidence": 0.5,
+            "time_window": self.cheating_window_seconds,
+        }
+        window.last_paper_output = now
+        self._outputs.append(output)
+        logger.info(
+            "inference.output type=%s student_global_id=%s related=%d",
+            output.get("type"),
+            global_id,
+            len(related),
+        )
+
     def _maybe_emit_fight(self, global_id: int, window: PersonSignalWindow, now: float) -> None:
         if now - window.last_fight_output < self.fight_emit_interval_seconds:
             return
@@ -318,6 +428,9 @@ class InferenceManager:
             return
         duration = _group_duration(recent)
         motion_intensity = _group_motion_intensity(recent)
+        members = _group_members(recent)
+        student_members = [gid for gid in members if self._roles.get(gid) == "student"]
+        teacher_members = [gid for gid in members if self._roles.get(gid) == "teacher"]
 
         if duration < 5.0:
             level = "low"
@@ -341,6 +454,39 @@ class InferenceManager:
             group_id,
             level,
         )
+
+        if len(student_members) >= 2 and not teacher_members:
+            collab_output = {
+                "timestamp": now,
+                "type": "group_collaboration",
+                "group_id": group_id,
+                "student_global_ids": sorted(student_members),
+                "duration_seconds": duration,
+                "confidence": min(1.0, 0.4 + min(0.6, duration / 30.0) + motion_intensity * 0.2),
+            }
+            self._outputs.append(collab_output)
+            logger.info(
+                "inference.output type=%s group_id=%s students=%d",
+                collab_output.get("type"),
+                group_id,
+                len(student_members),
+            )
+
+            student_output = {
+                "timestamp": now,
+                "type": "student_group_interaction",
+                "group_id": group_id,
+                "student_global_ids": sorted(student_members),
+                "duration_seconds": duration,
+                "confidence": min(1.0, 0.3 + min(0.6, duration / 30.0)),
+            }
+            self._outputs.append(student_output)
+            logger.info(
+                "inference.output type=%s group_id=%s students=%d",
+                student_output.get("type"),
+                group_id,
+                len(student_members),
+            )
 
 
 def _filter_recent(events: Deque[Dict[str, object]], since: float) -> List[Dict[str, object]]:
@@ -446,6 +592,15 @@ def _group_duration(events: List[Dict[str, object]]) -> float:
         if e.get("event_type") in ("group_formed", "group_updated")
     ]
     return max(durations) if durations else 0.0
+
+
+def _group_members(events: List[Dict[str, object]]) -> List[int]:
+    for e in reversed(events):
+        if e.get("event_type") in ("group_formed", "group_updated"):
+            members = e.get("members")
+            if isinstance(members, list):
+                return [m for m in members if isinstance(m, int)]
+    return []
 
 
 def _group_motion_intensity(events: List[Dict[str, object]]) -> float:
