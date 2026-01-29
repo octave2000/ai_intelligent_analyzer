@@ -12,3 +12,5 @@ models/
 *.pt
 *.onnx
 *.zip
+yolov8n.pt
+yolov8s.pt

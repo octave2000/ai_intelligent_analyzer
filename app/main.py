@@ -56,6 +56,8 @@ def create_app() -> FastAPI:
         object_conf_threshold=settings.overlay_object_conf_threshold,
         disk_retention_seconds=settings.overlay_disk_retention_seconds,
         cleanup_interval_seconds=settings.overlay_cleanup_interval_seconds,
+        snapshot_enabled=settings.overlay_snapshot_enabled,
+        snapshot_path=settings.overlay_snapshot_path,
     )
     face_identifier = FaceIdentifier(
         roster_path=settings.roster_path,

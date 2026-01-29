@@ -193,6 +193,8 @@ class Settings:
     overlay_object_conf_threshold: float
     overlay_disk_retention_seconds: float
     overlay_cleanup_interval_seconds: float
+    overlay_snapshot_enabled: bool
+    overlay_snapshot_path: str
     rtsp_transport: str
     object_allowlist: tuple
     object_priority: tuple
@@ -328,6 +330,12 @@ class Settings:
         )
         self.overlay_cleanup_interval_seconds = _get_float(
             "OVERLAY_CLEANUP_INTERVAL_SECONDS", 60.0
+        )
+        self.overlay_snapshot_enabled = _get_bool(
+            "OVERLAY_SNAPSHOT_ENABLED", False
+        )
+        self.overlay_snapshot_path = os.getenv(
+            "OVERLAY_SNAPSHOT_PATH", "data/overlay_snapshots"
         )
         self.rtsp_transport = os.getenv("RTSP_TRANSPORT", "tcp").strip().lower()
         self.object_config_path = os.getenv("OBJECT_CONFIG_PATH", "data/objects.json")

@@ -49,13 +49,25 @@ class YoloDetector:
 
     def _load(self) -> None:
         try:
+            import torch
             from ultralytics import YOLO
         except Exception:
             logger.warning("yolo_detector.unavailable reason=import_failed")
             self._ready = False
             return
         try:
-            model = YOLO(self.model_path)
+            model = None
+            safe_globals = getattr(torch.serialization, "safe_globals", None)
+            if safe_globals is not None:
+                try:
+                    from ultralytics.nn.tasks import DetectionModel
+                except Exception:
+                    DetectionModel = None  # type: ignore[assignment]
+                if DetectionModel is not None:
+                    with safe_globals([DetectionModel]):
+                        model = YOLO(self.model_path)
+            if model is None:
+                model = YOLO(self.model_path)
             self._model = model
             self._names = list(model.names.values()) if isinstance(model.names, dict) else list(model.names)
             self._ready = True

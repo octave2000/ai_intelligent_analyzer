@@ -333,7 +333,11 @@ class PerceptionManager:
         else:
             self._camera_index = 0
 
-    def _emit(self, event: Dict[str, object]) -> None:
+    def _emit(
+        self,
+        event: Dict[str, object],
+        frame: Optional["cv2.typing.MatLike"] = None,
+    ) -> None:
         self._events.append(event)
         logger.info(
             "perception.event room_id=%s camera_id=%s event_type=%s",
@@ -345,7 +349,7 @@ class PerceptionManager:
             room_id = event.get("room_id")
             camera_id = event.get("camera_id")
             if isinstance(room_id, str) and isinstance(camera_id, str):
-                self.overlay_store.add_event(room_id, camera_id, event)
+                self.overlay_store.add_event(room_id, camera_id, event, frame=frame)
 
     def _run(self) -> None:
         while not self._stop_event.is_set():
@@ -464,8 +468,8 @@ class PerceptionManager:
                     state.camera_id,
                     len(objects),
                 )
-                self._update_object_tracks(state, objects)
-                self._associate_objects(state)
+                self._update_object_tracks(state, objects, frame)
+                self._associate_objects(state, frame)
                 self._update_proximity(state)
                 self._update_groups(state)
             success = True
@@ -562,7 +566,7 @@ class PerceptionManager:
                         "bbox": detection.bbox,
                     },
                 )
-            )
+            , frame=frame)
             self._update_role(state, track, frame)
             self._update_orientation(state, track)
             matched_track_ids.add(track_id)
@@ -595,7 +599,7 @@ class PerceptionManager:
                         "bbox": detection.bbox,
                     },
                 )
-            )
+            , frame=frame)
             self._update_role(state, track, frame)
             self._update_orientation(state, track)
 
@@ -629,7 +633,7 @@ class PerceptionManager:
                         track.global_id,
                         {"track_id": track.track_id, "role": track.role},
                     )
-                )
+                , frame=frame)
             return
         if track.role == "student" and track.role_confidence >= 0.7:
             return
@@ -645,7 +649,7 @@ class PerceptionManager:
                     track.global_id,
                     {"track_id": track.track_id, "role": track.role},
                 )
-            )
+            , frame=frame)
             return
 
         height = max(1, track.bbox[3] - track.bbox[1])
@@ -664,7 +668,7 @@ class PerceptionManager:
                         track.global_id,
                         {"track_id": track.track_id, "role": track.role},
                     )
-                )
+                , frame=frame)
 
     def _update_identity(
         self, state: CameraPerceptionState, track: TrackState, faces: List[FaceMatch]
@@ -848,7 +852,12 @@ class PerceptionManager:
             )
         return None
 
-    def _update_object_tracks(self, state: CameraPerceptionState, detections: List[ObjectDetection]) -> None:
+    def _update_object_tracks(
+        self,
+        state: CameraPerceptionState,
+        detections: List[ObjectDetection],
+        frame: "cv2.typing.MatLike",
+    ) -> None:
         now = time.time()
         tracks = state.object_tracks
         matches = _match_object_detections(detections, list(tracks.values()), self.object_iou_threshold)
@@ -901,9 +910,13 @@ class PerceptionManager:
                             "risky": detection.object_type in self.object_risky,
                         },
                     )
-                )
+                , frame=frame)
 
-    def _associate_objects(self, state: CameraPerceptionState) -> None:
+    def _associate_objects(
+        self,
+        state: CameraPerceptionState,
+        frame: "cv2.typing.MatLike",
+    ) -> None:
         if not state.tracks or not state.object_tracks:
             return
         for obj_track in state.object_tracks.values():
@@ -939,11 +952,12 @@ class PerceptionManager:
                         "object_type": detection.object_type,
                         "category": detection.category,
                         "risk_level": detection.risk_level,
+                        "bbox": detection.bbox,
                         "priority": detection.object_type in self.object_priority,
                         "risky": detection.object_type in self.object_risky,
                     },
                 )
-            )
+            , frame=frame)
 
         if not self.exam_mode:
             return
@@ -972,7 +986,7 @@ class PerceptionManager:
                             "risky": "concealed_paper" in self.object_risky,
                         },
                     )
-                )
+                , frame=frame)
 
     def _update_proximity(self, state: CameraPerceptionState) -> None:
         tracks = list(state.tracks.values())
