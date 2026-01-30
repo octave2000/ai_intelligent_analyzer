@@ -15,13 +15,21 @@ class YoloDetection:
 
 
 class YoloDetector:
-    def __init__(self, model_path: str, conf_threshold: float, iou_threshold: float) -> None:
+    def __init__(
+        self,
+        model_path: str,
+        conf_threshold: float,
+        iou_threshold: float,
+        device: str = "auto",
+    ) -> None:
         self.model_path = model_path
         self.conf_threshold = conf_threshold
         self.iou_threshold = iou_threshold
+        self.device = device
         self._model = None
         self._names: List[str] = []
         self._ready = False
+        self._device = "cpu"
         self._load()
 
     def ready(self) -> bool:
@@ -35,6 +43,7 @@ class YoloDetector:
             source=frame,
             conf=self.conf_threshold,
             iou=self.iou_threshold,
+            device=self._device,
             verbose=False,
         )
         detections: List[YoloDetection] = []
@@ -57,6 +66,10 @@ class YoloDetector:
             return
         try:
             model = None
+            if self.device == "auto":
+                self._device = "cuda:0" if torch.cuda.is_available() else "cpu"
+            else:
+                self._device = self.device
             safe_globals = getattr(torch.serialization, "safe_globals", None)
             if safe_globals is not None:
                 try:
@@ -68,10 +81,19 @@ class YoloDetector:
                         model = YOLO(self.model_path)
             if model is None:
                 model = YOLO(self.model_path)
+            try:
+                model.to(self._device)
+            except Exception:
+                pass
             self._model = model
             self._names = list(model.names.values()) if isinstance(model.names, dict) else list(model.names)
             self._ready = True
-            logger.info("yolo_detector.ready model_path=%s labels=%d", self.model_path, len(self._names))
+            logger.info(
+                "yolo_detector.ready model_path=%s labels=%d device=%s",
+                self.model_path,
+                len(self._names),
+                self._device,
+            )
         except Exception:
             logger.warning("yolo_detector.unavailable reason=load_failed model_path=%s", self.model_path)
             self._ready = False

@@ -50,6 +50,7 @@ def main() -> int:
         similarity_threshold=float(os.getenv("FACE_SIMILARITY_THRESHOLD", "0.35")),
         model_name=os.getenv("FACE_MODEL_NAME", "buffalo_s"),
         model_root=os.getenv("FACE_MODEL_ROOT") or None,
+        ctx_id=int(os.getenv("FACE_CTX_ID", "-1")),
     )
 
     yolo_mode = os.getenv("USE_YOLO", "auto").strip().lower()
@@ -59,6 +60,7 @@ def main() -> int:
             model_path=os.getenv("YOLO_MODEL_PATH", "yolov8n.pt"),
             conf_threshold=float(os.getenv("YOLO_CONF_THRESHOLD", "0.35")),
             iou_threshold=float(os.getenv("YOLO_IOU_THRESHOLD", "0.45")),
+            device=os.getenv("YOLO_DEVICE", "auto").strip().lower(),
         )
 
     face_scores: List[float] = []

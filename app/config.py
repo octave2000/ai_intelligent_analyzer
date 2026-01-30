@@ -20,6 +20,21 @@ def _get_int(name: str, default: int) -> int:
         return default
 
 
+def _get_face_ctx_id(name: str, default: str = "auto") -> int:
+    raw = os.getenv(name, default).strip().lower()
+    if raw in ("auto", ""):
+        try:
+            import onnxruntime as ort  # type: ignore[import-not-found]
+
+            return 0 if ort.get_device().upper() == "GPU" else -1
+        except Exception:
+            return -1
+    try:
+        return int(raw)
+    except ValueError:
+        return -1
+
+
 def _get_float(name: str, default: float) -> float:
     raw = os.getenv(name)
     if raw is None:
@@ -182,10 +197,12 @@ class Settings:
     face_similarity_threshold: float
     face_model_name: str
     face_model_root: Optional[str]
+    face_ctx_id: int
     yolo_mode: str
     yolo_model_path: str
     yolo_conf_threshold: float
     yolo_iou_threshold: float
+    yolo_device: str
     overlay_path: str
     overlay_retention_seconds: float
     overlay_flush_interval_seconds: float
@@ -310,10 +327,12 @@ class Settings:
         )
         self.face_model_name = os.getenv("FACE_MODEL_NAME", "buffalo_s")
         self.face_model_root = os.getenv("FACE_MODEL_ROOT", "") or None
+        self.face_ctx_id = _get_face_ctx_id("FACE_CTX_ID", "auto")
         self.yolo_mode = _get_mode("USE_YOLO", "auto")
         self.yolo_model_path = os.getenv("YOLO_MODEL_PATH", "yolov8n.pt")
         self.yolo_conf_threshold = _get_float("YOLO_CONF_THRESHOLD", 0.35)
         self.yolo_iou_threshold = _get_float("YOLO_IOU_THRESHOLD", 0.45)
+        self.yolo_device = os.getenv("YOLO_DEVICE", "auto").strip().lower()
         self.overlay_path = os.getenv("OVERLAY_PATH", "data/overlay")
         self.overlay_retention_seconds = _get_float("OVERLAY_RETENTION_SECONDS", 60.0)
         self.overlay_flush_interval_seconds = _get_float(

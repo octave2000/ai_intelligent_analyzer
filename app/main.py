@@ -64,6 +64,7 @@ def create_app() -> FastAPI:
         similarity_threshold=settings.face_similarity_threshold,
         model_name=settings.face_model_name,
         model_root=settings.face_model_root,
+        ctx_id=settings.face_ctx_id,
     )
     yolo_detector = None
     if settings.yolo_mode != "disable":
@@ -71,6 +72,7 @@ def create_app() -> FastAPI:
             model_path=settings.yolo_model_path,
             conf_threshold=settings.yolo_conf_threshold,
             iou_threshold=settings.yolo_iou_threshold,
+            device=settings.yolo_device,
         )
         if yolo_candidate.ready() or settings.yolo_mode == "force":
             yolo_detector = yolo_candidate

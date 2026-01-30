@@ -31,11 +31,13 @@ class FaceIdentifier:
         similarity_threshold: float,
         model_name: str,
         model_root: Optional[str],
+        ctx_id: int = -1,
     ) -> None:
         self.roster_path = roster_path
         self.similarity_threshold = similarity_threshold
         self.model_name = model_name
         self.model_root = model_root
+        self.ctx_id = ctx_id
         self._app: Any = None
         self._roster: List[RosterEntry] = []
         self._ready = False
@@ -80,7 +82,7 @@ class FaceIdentifier:
         try:
             model_root = self.model_root or ""
             app = FaceAnalysis(name=self.model_name, root=model_root)
-            app.prepare(ctx_id=-1)
+            app.prepare(ctx_id=self.ctx_id)
             self._app = app
             self._ready = True
         except Exception:
