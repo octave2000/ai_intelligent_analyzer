@@ -2,12 +2,11 @@ __pycache__/
 *.py[cod]
 .venv/
 venv/
-data/
+
 *.jpg
 .DS_Store
 .env
 # Data & models
-
 models/
 *.pt
 *.onnx

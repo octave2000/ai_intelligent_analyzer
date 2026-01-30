@@ -1,0 +1,25 @@
+{
+  "allowlist": [
+    "phone",
+    "laptop",
+    "tablet",
+    "book",
+    "paper",
+    "desk",
+    "chair",
+    "bench",
+    "notebook",
+    "calculator",
+    "knife",
+    "knife_like",
+    "concealed_paper",
+    "beaker",
+    "test_tube",
+    "burner",
+    "backpack",
+    "pouch",
+    "device"
+  ],
+  "priority": ["phone", "knife", "knife_like"],
+  "risky": ["knife", "knife_like", "concealed_paper"]
+}
