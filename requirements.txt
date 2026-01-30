@@ -4,7 +4,7 @@ opencv-python==4.10.0.84
 numpy==1.26.4
 ultralytics==8.2.0
 onnxruntime==1.17.3
-onnxruntime-gpu==1.17.3
+onnxruntime-gpu==1.23.2
 torch==2.3.0
 torchvision==0.18.0
 torchaudio==2.3.0
