@@ -1,0 +1,51 @@
+name: Build and Release Binary
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      - name: Build binary
+        run: |
+          pyinstaller --noconfirm --clean \
+            --name iss_app \
+            --add-data "data:data" \
+            --add-data "models:models" \
+            --add-data "yolov8n.pt:." \
+            --add-data "yolov8s.pt:." \
+            app/entrypoint.py
+
+      - name: Package artifact
+        run: |
+          tar -czf iss_app-linux-x86_64.tar.gz -C dist iss_app
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ github.sha }}
+          name: Build ${{ github.sha }}
+          target_commitish: main
+          prerelease: true
+          files: iss_app-linux-x86_64.tar.gz
