@@ -37,6 +37,8 @@ class OverlayStore:
         cleanup_interval_seconds: float = 60.0,
         snapshot_enabled: bool = False,
         snapshot_path: str = "data/overlay_snapshots",
+        snapshot_all: bool = False,
+        snapshot_min_interval_seconds: float = 1.0,
     ) -> None:
         self.root_path = root_path
         self.retention_seconds = retention_seconds
@@ -45,6 +47,9 @@ class OverlayStore:
         self.cleanup_interval_seconds = max(5.0, cleanup_interval_seconds)
         self.snapshot_enabled = snapshot_enabled
         self.snapshot_path = snapshot_path
+        self.snapshot_all = snapshot_all
+        self.snapshot_min_interval_seconds = max(0.1, snapshot_min_interval_seconds)
+        self._last_snapshot_all: Dict[str, Dict[str, float]] = {}
         self._buffers: Dict[str, Dict[str, OverlayBuffer]] = {}
         self._snapshot_buffers: Dict[str, Dict[str, Dict[int, SnapshotBuffer]]] = {}
         self._lock = threading.Lock()
@@ -244,6 +249,52 @@ class OverlayStore:
         dir_path = os.path.join(self.snapshot_path, room_id, camera_id)
         os.makedirs(dir_path, exist_ok=True)
         filename = f"{ts}.jpg"
+        path = os.path.join(dir_path, filename)
+        try:
+            cv2.imwrite(path, image)
+        except Exception:
+            return
+
+    def add_snapshot_all(
+        self,
+        room_id: str,
+        camera_id: str,
+        annotations: list,
+        frame: "cv2.typing.MatLike",
+        timestamp: Optional[float] = None,
+    ) -> None:
+        if not self.snapshot_all:
+            return
+        now = time.time() if timestamp is None else timestamp
+        with self._lock:
+            room = self._last_snapshot_all.setdefault(room_id, {})
+            last_ts = room.get(camera_id, 0.0)
+            if now - last_ts < self.snapshot_min_interval_seconds:
+                return
+            room[camera_id] = now
+        try:
+            image = frame.copy()
+        except Exception:
+            return
+        for ann in annotations:
+            bbox = ann.get("bbox")
+            if isinstance(bbox, (list, tuple)) and len(bbox) == 4:
+                x1, y1, x2, y2 = (int(v) for v in bbox)
+                cv2.rectangle(image, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                label = ann.get("label")
+                if label:
+                    cv2.putText(
+                        image,
+                        str(label),
+                        (x1, max(12, y1 - 6)),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.5,
+                        (0, 255, 0),
+                        1,
+                    )
+        dir_path = os.path.join(self.snapshot_path, room_id, camera_id, "all")
+        os.makedirs(dir_path, exist_ok=True)
+        filename = f"{int(now * 1000)}.jpg"
         path = os.path.join(dir_path, filename)
         try:
             cv2.imwrite(path, image)

@@ -98,19 +98,20 @@ def _load_object_config(
     default_allowlist: tuple,
     default_priority: tuple,
     default_risky: tuple,
+    default_label_map: dict,
 ) -> tuple:
     if not path:
-        return default_allowlist, default_priority, default_risky
+        return default_allowlist, default_priority, default_risky, default_label_map
     try:
         import json
 
         with open(path, "r", encoding="utf-8") as handle:
             payload = json.load(handle)
     except Exception:
-        return default_allowlist, default_priority, default_risky
+        return default_allowlist, default_priority, default_risky, default_label_map
 
     if not isinstance(payload, dict):
-        return default_allowlist, default_priority, default_risky
+        return default_allowlist, default_priority, default_risky, default_label_map
 
     def _read_list(key: str, fallback: tuple) -> tuple:
         value = payload.get(key)
@@ -122,7 +123,32 @@ def _load_object_config(
     allowlist = _read_list("allowlist", default_allowlist)
     priority = _read_list("priority", default_priority)
     risky = _read_list("risky", default_risky)
-    return allowlist, priority, risky
+
+    label_map_raw = payload.get("label_map", {})
+    label_map = default_label_map
+    if isinstance(label_map_raw, dict):
+        cleaned: dict = {}
+        for key, value in label_map_raw.items():
+            if not isinstance(key, str) or not isinstance(value, dict):
+                continue
+            object_type = value.get("object_type", key)
+            category = value.get("category", "other")
+            risk_level = value.get("risk_level", "low")
+            if not isinstance(object_type, str) or not object_type.strip():
+                continue
+            if not isinstance(category, str) or not category.strip():
+                category = "other"
+            if not isinstance(risk_level, str) or not risk_level.strip():
+                risk_level = "low"
+            cleaned[key] = {
+                "object_type": object_type.strip(),
+                "category": category.strip(),
+                "risk_level": risk_level.strip(),
+            }
+        if cleaned:
+            label_map = cleaned
+
+    return allowlist, priority, risky, label_map
 
 
 def _load_mode_config(path: str, default_exam_mode: bool) -> bool:
@@ -157,20 +183,7 @@ class Settings:
     read_timeout_seconds: float
     use_ffmpeg: str
     storage_path: str
-    gate_sample_interval_seconds: float
-    gate_window_size: int
-    gate_active_enter: float
-    gate_active_exit: float
-    gate_spike_enter: float
-    gate_spike_exit: float
-    gate_spike_cooldown_seconds: float
-    gate_stale_seconds: float
-    gate_downsample_width: int
-    gate_downsample_height: int
     perception_active_interval_seconds: float
-    perception_spike_interval_seconds: float
-    perception_spike_burst_seconds: float
-    perception_idle_heartbeat_seconds: float
     perception_stale_seconds: float
     perception_track_ttl_seconds: float
     perception_object_ttl_seconds: float
@@ -212,10 +225,13 @@ class Settings:
     overlay_cleanup_interval_seconds: float
     overlay_snapshot_enabled: bool
     overlay_snapshot_path: str
+    overlay_snapshot_all: bool
+    overlay_snapshot_min_interval_seconds: float
     rtsp_transport: str
     object_allowlist: tuple
     object_priority: tuple
     object_risky: tuple
+    object_label_map: dict
     object_config_path: str
     mode_config_path: str
     inference_cheating_window_seconds: float
@@ -240,31 +256,8 @@ class Settings:
         self.read_timeout_seconds = _get_float("READ_TIMEOUT_SECONDS", 10.0)
         self.use_ffmpeg = _get_ffmpeg_mode()
         self.storage_path = os.getenv("STORAGE_PATH", "data/rooms.json")
-        self.gate_sample_interval_seconds = _get_float(
-            "GATE_SAMPLE_INTERVAL_SECONDS", 1.0
-        )
-        self.gate_window_size = _get_int("GATE_WINDOW_SIZE", 5)
-        self.gate_active_enter = _get_float("GATE_ACTIVE_ENTER", 0.08)
-        self.gate_active_exit = _get_float("GATE_ACTIVE_EXIT", 0.04)
-        self.gate_spike_enter = _get_float("GATE_SPIKE_ENTER", 0.35)
-        self.gate_spike_exit = _get_float("GATE_SPIKE_EXIT", 0.2)
-        self.gate_spike_cooldown_seconds = _get_float(
-            "GATE_SPIKE_COOLDOWN_SECONDS", 3.0
-        )
-        self.gate_stale_seconds = _get_float("GATE_STALE_SECONDS", 2.5)
-        self.gate_downsample_width = _get_int("GATE_DOWNSAMPLE_WIDTH", 64)
-        self.gate_downsample_height = _get_int("GATE_DOWNSAMPLE_HEIGHT", 36)
         self.perception_active_interval_seconds = _get_float(
             "PERCEPTION_ACTIVE_INTERVAL_SECONDS", 2.0
-        )
-        self.perception_spike_interval_seconds = _get_float(
-            "PERCEPTION_SPIKE_INTERVAL_SECONDS", 0.5
-        )
-        self.perception_spike_burst_seconds = _get_float(
-            "PERCEPTION_SPIKE_BURST_SECONDS", 3.0
-        )
-        self.perception_idle_heartbeat_seconds = _get_float(
-            "PERCEPTION_IDLE_HEARTBEAT_SECONDS", 30.0
         )
         self.perception_stale_seconds = _get_float("PERCEPTION_STALE_SECONDS", 2.5)
         self.perception_track_ttl_seconds = _get_float("PERCEPTION_TRACK_TTL_SECONDS", 2.5)
@@ -356,9 +349,13 @@ class Settings:
         self.overlay_snapshot_path = os.getenv(
             "OVERLAY_SNAPSHOT_PATH", "data/overlay_snapshots"
         )
+        self.overlay_snapshot_all = _get_bool("OVERLAY_SNAPSHOT_ALL", False)
+        self.overlay_snapshot_min_interval_seconds = _get_float(
+            "OVERLAY_SNAPSHOT_MIN_INTERVAL_SECONDS", 1.0
+        )
         self.rtsp_transport = os.getenv("RTSP_TRANSPORT", "tcp").strip().lower()
         self.object_config_path = os.getenv("OBJECT_CONFIG_PATH", "data/objects.json")
-        allowlist, priority, risky = _load_object_config(
+        allowlist, priority, risky, label_map = _load_object_config(
             self.object_config_path,
             default_allowlist=(
                 "phone",
@@ -380,10 +377,12 @@ class Settings:
             ),
             default_priority=("phone", "knife", "knife_like"),
             default_risky=("knife", "knife_like", "concealed_paper"),
+            default_label_map={},
         )
         self.object_allowlist = allowlist
         self.object_priority = priority
         self.object_risky = risky
+        self.object_label_map = label_map
         self.inference_cheating_window_seconds = _get_float(
             "INFERENCE_CHEATING_WINDOW_SECONDS", 60.0
         )

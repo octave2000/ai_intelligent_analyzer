@@ -21,5 +21,92 @@
     "device"
   ],
   "priority": ["phone", "knife", "knife_like"],
-  "risky": ["knife", "knife_like", "concealed_paper"]
+  "risky": ["knife", "knife_like", "concealed_paper"],
+  "label_map": {
+    "cell phone": {
+      "object_type": "phone",
+      "category": "devices",
+      "risk_level": "low"
+    },
+    "laptop": {
+      "object_type": "laptop",
+      "category": "devices",
+      "risk_level": "low"
+    },
+    "tablet": {
+      "object_type": "tablet",
+      "category": "devices",
+      "risk_level": "low"
+    },
+    "book": {
+      "object_type": "book",
+      "category": "academic",
+      "risk_level": "low"
+    },
+    "paper": {
+      "object_type": "paper",
+      "category": "academic",
+      "risk_level": "low"
+    },
+    "notebook": {
+      "object_type": "notebook",
+      "category": "academic",
+      "risk_level": "low"
+    },
+    "backpack": {
+      "object_type": "backpack",
+      "category": "personal",
+      "risk_level": "low"
+    },
+    "bench": {
+      "object_type": "bench",
+      "category": "furniture",
+      "risk_level": "low"
+    },
+    "chair": {
+      "object_type": "chair",
+      "category": "furniture",
+      "risk_level": "low"
+    },
+    "handbag": {
+      "object_type": "pouch",
+      "category": "personal",
+      "risk_level": "low"
+    },
+    "suitcase": {
+      "object_type": "pouch",
+      "category": "personal",
+      "risk_level": "low"
+    },
+    "knife": {
+      "object_type": "knife",
+      "category": "suspicious",
+      "risk_level": "high"
+    },
+    "scissors": {
+      "object_type": "scissors",
+      "category": "suspicious",
+      "risk_level": "high"
+    },
+    "tv": {
+      "object_type": "device",
+      "category": "devices",
+      "risk_level": "low"
+    },
+    "remote": {
+      "object_type": "device",
+      "category": "devices",
+      "risk_level": "low"
+    },
+    "keyboard": {
+      "object_type": "device",
+      "category": "devices",
+      "risk_level": "low"
+    },
+    "mouse": {
+      "object_type": "device",
+      "category": "devices",
+      "risk_level": "low"
+    }
+  }
 }

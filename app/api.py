@@ -6,7 +6,6 @@ from fastapi import APIRouter, HTTPException, Response
 from pydantic import BaseModel, Field
 
 from app.inference_manager import InferenceManager
-from app.motion_gate import MotionGateManager
 from app.perception_manager import PerceptionManager
 from app.stream_manager import StreamManager
 from app.attendance_manager import AttendanceManager
@@ -22,7 +21,6 @@ def _encode_jpeg(frame: "cv2.typing.MatLike") -> Optional[bytes]:
 
 def build_router(
     manager: StreamManager,
-    gate: MotionGateManager,
     perception: PerceptionManager,
     inference: InferenceManager,
     attendance: AttendanceManager,
@@ -64,7 +62,6 @@ def build_router(
         removed = manager.remove_room(room_id)
         if not removed:
             raise HTTPException(status_code=404, detail="Room not found")
-        gate.remove_room(room_id)
         perception.remove_room(room_id)
         return {"room_id": room_id, "removed": True}
 
@@ -75,7 +72,6 @@ def build_router(
         )
         if not added:
             raise HTTPException(status_code=404, detail="Room not found or camera exists")
-        gate.add_camera(room_id, payload.camera_id, payload.role)
         perception.add_camera(room_id, payload.camera_id)
         return {"room_id": room_id, "camera_id": payload.camera_id, "added": True}
 
@@ -84,7 +80,6 @@ def build_router(
         removed = manager.remove_camera(room_id, camera_id)
         if not removed:
             raise HTTPException(status_code=404, detail="Room or camera not found")
-        gate.remove_camera(room_id, camera_id)
         perception.remove_camera(room_id, camera_id)
         return {"room_id": room_id, "camera_id": camera_id, "removed": True}
 
@@ -95,19 +90,6 @@ def build_router(
             raise HTTPException(status_code=404, detail="Room not found")
         return status
 
-    @router.get("/rooms/{room_id}/activity")
-    def room_activity(room_id: str) -> dict:
-        status = gate.room_activity(room_id)
-        if status is None:
-            raise HTTPException(status_code=404, detail="Room not found")
-        return status
-
-    @router.get("/rooms/{room_id}/cameras/{camera_id}/activity")
-    def camera_activity(room_id: str, camera_id: str) -> dict:
-        status = gate.activity(room_id, camera_id)
-        if status is None:
-            raise HTTPException(status_code=404, detail="Room or camera not found")
-        return status
 
     @router.get("/rooms/{room_id}/cameras/{camera_id}/snapshot")
     def snapshot(room_id: str, camera_id: str) -> Response:
@@ -119,9 +101,6 @@ def build_router(
             raise HTTPException(status_code=500, detail="Failed to encode frame")
         return Response(content=payload, media_type="image/jpeg")
 
-    @router.get("/activity")
-    def all_activity() -> dict:
-        return gate.all_activity()
 
     @router.get("/perception/events")
     def perception_events(

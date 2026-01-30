@@ -28,15 +28,6 @@ curl -s -X POST http://localhost:8000/rooms/{room_id}/cameras \
 curl -s -X DELETE http://localhost:8000/rooms/{room_id}/cameras/{camera_id} | jq
 ```
 
-## Activity (Motion Gate)
-```bash
-curl -s http://localhost:8000/activity | jq
-
-curl -s http://localhost:8000/rooms/{room_id}/activity | jq
-
-curl -s http://localhost:8000/rooms/{room_id}/cameras/{camera_id}/activity | jq
-```
-
 ## Room Health
 ```bash
 curl -s http://localhost:8000/rooms/{room_id}/health | jq

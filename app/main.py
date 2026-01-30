@@ -8,7 +8,6 @@ from app.attendance_manager import AttendanceManager
 from app.config import settings
 from app.face_identifier import FaceIdentifier
 from app.inference_manager import InferenceManager
-from app.motion_gate import MotionGateManager
 from app.overlay_store import OverlayStore
 from app.perception_manager import PerceptionManager
 from app.stream_manager import StreamManager
@@ -33,20 +32,6 @@ def create_app() -> FastAPI:
         use_ffmpeg=settings.use_ffmpeg,
         storage_path=settings.storage_path,
     )
-    gate = MotionGateManager(
-        stream_manager=manager,
-        sample_interval=settings.gate_sample_interval_seconds,
-        window_size=settings.gate_window_size,
-        active_enter=settings.gate_active_enter,
-        active_exit=settings.gate_active_exit,
-        spike_enter=settings.gate_spike_enter,
-        spike_exit=settings.gate_spike_exit,
-        spike_cooldown_seconds=settings.gate_spike_cooldown_seconds,
-        stale_seconds=settings.gate_stale_seconds,
-        downsample_width=settings.gate_downsample_width,
-        downsample_height=settings.gate_downsample_height,
-    )
-    gate.bootstrap_from_stream_manager()
     attendance = AttendanceManager(storage_path=settings.attendance_path)
     overlay_store = OverlayStore(
         root_path=settings.overlay_path,
@@ -58,6 +43,8 @@ def create_app() -> FastAPI:
         cleanup_interval_seconds=settings.overlay_cleanup_interval_seconds,
         snapshot_enabled=settings.overlay_snapshot_enabled,
         snapshot_path=settings.overlay_snapshot_path,
+        snapshot_all=settings.overlay_snapshot_all,
+        snapshot_min_interval_seconds=settings.overlay_snapshot_min_interval_seconds,
     )
     face_identifier = FaceIdentifier(
         roster_path=settings.roster_path,
@@ -88,11 +75,7 @@ def create_app() -> FastAPI:
         )
     perception = PerceptionManager(
         stream_manager=manager,
-        gate=gate,
         active_interval_seconds=settings.perception_active_interval_seconds,
-        spike_interval_seconds=settings.perception_spike_interval_seconds,
-        spike_burst_seconds=settings.perception_spike_burst_seconds,
-        idle_heartbeat_seconds=settings.perception_idle_heartbeat_seconds,
         stale_seconds=settings.perception_stale_seconds,
         track_ttl_seconds=settings.perception_track_ttl_seconds,
         object_ttl_seconds=settings.perception_object_ttl_seconds,
@@ -121,6 +104,7 @@ def create_app() -> FastAPI:
         object_allowlist=settings.object_allowlist,
         object_priority=settings.object_priority,
         object_risky=settings.object_risky,
+        object_label_map=settings.object_label_map,
     )
     perception.bootstrap_from_stream_manager()
     inference = InferenceManager(
@@ -156,7 +140,6 @@ def create_app() -> FastAPI:
     app.include_router(
         build_router(
             manager,
-            gate,
             perception,
             inference,
             attendance,

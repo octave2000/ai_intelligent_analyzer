@@ -10,7 +10,6 @@ import cv2
 import numpy as np
 
 from app.face_identifier import FaceIdentifier, FaceMatch
-from app.motion_gate import MotionGateManager
 from app.attendance_manager import AttendanceManager
 from app.yolo_detector import YoloDetector, YoloDetection
 from app.overlay_store import OverlayStore
@@ -77,7 +76,6 @@ class CameraPerceptionState:
     next_track_id: int = 1
     next_object_id: int = 1
     last_run: float = 0.0
-    last_spike_time: Optional[float] = None
     lock: threading.Lock = field(default_factory=threading.Lock)
     proximity_state: Dict[Tuple[int, int], Tuple[bool, float, bool]] = field(default_factory=dict)
     group_state: Dict[frozenset, Tuple[int, float, bool]] = field(default_factory=dict)
@@ -143,11 +141,7 @@ class PerceptionManager:
     def __init__(
         self,
         stream_manager: StreamManager,
-        gate: MotionGateManager,
         active_interval_seconds: float,
-        spike_interval_seconds: float,
-        spike_burst_seconds: float,
-        idle_heartbeat_seconds: float,
         stale_seconds: float,
         track_ttl_seconds: float,
         object_ttl_seconds: float,
@@ -176,13 +170,10 @@ class PerceptionManager:
         object_allowlist: Tuple[str, ...] = (),
         object_priority: Tuple[str, ...] = (),
         object_risky: Tuple[str, ...] = (),
+        object_label_map: Optional[Dict[str, Dict[str, str]]] = None,
     ) -> None:
         self.stream_manager = stream_manager
-        self.gate = gate
         self.active_interval_seconds = active_interval_seconds
-        self.spike_interval_seconds = spike_interval_seconds
-        self.spike_burst_seconds = spike_burst_seconds
-        self.idle_heartbeat_seconds = idle_heartbeat_seconds
         self.stale_seconds = stale_seconds
         self.track_ttl_seconds = track_ttl_seconds
         self.object_ttl_seconds = object_ttl_seconds
@@ -209,6 +200,7 @@ class PerceptionManager:
         self.object_allowlist = set(object_allowlist)
         self.object_priority = set(object_priority)
         self.object_risky = set(object_risky)
+        self.object_label_map = object_label_map or {}
 
         self._cameras: Dict[str, Dict[str, CameraPerceptionState]] = {}
         self._lock = threading.Lock()
@@ -370,41 +362,14 @@ class PerceptionManager:
                     state = self._cameras.get(room_id, {}).get(camera_id)
                 if state is None:
                     continue
-                gate_info = self.gate.activity(room_id, camera_id)
-                if gate_info is None:
-                    logger.debug(
-                        "perception.gate_missing room_id=%s camera_id=%s",
-                        room_id,
-                        camera_id,
-                    )
-                    continue
-                gate_state = gate_info.get("activity_state")
-                if not isinstance(gate_state, str) or gate_state not in ("IDLE", "ACTIVE", "SPIKE"):
-                    logger.debug(
-                        "perception.gate_invalid room_id=%s camera_id=%s gate_state=%s",
-                        room_id,
-                        camera_id,
-                        gate_state,
-                    )
-                    continue
                 interval = self.active_interval_seconds
-                if gate_state == "IDLE":
-                    if self.idle_heartbeat_seconds <= 0:
-                        continue
-                    interval = self.idle_heartbeat_seconds
-                if gate_state == "SPIKE":
-                    if state.last_spike_time is None:
-                        state.last_spike_time = now
-                    if state.last_spike_time is not None and now - state.last_spike_time <= self.spike_burst_seconds:
-                        interval = self.spike_interval_seconds
                 if now - state.last_run < interval:
                     continue
                 state.last_run = now
                 logger.debug(
-                    "perception.process_start room_id=%s camera_id=%s gate_state=%s",
+                    "perception.process_start room_id=%s camera_id=%s",
                     room_id,
                     camera_id,
-                    gate_state,
                 )
                 self._process_camera(state)
                 processed += 1
@@ -472,6 +437,32 @@ class PerceptionManager:
                 self._associate_objects(state, frame)
                 self._update_proximity(state)
                 self._update_groups(state)
+                if self.overlay_store is not None:
+                    annotations = []
+                    for det in detections:
+                        annotations.append(
+                            {
+                                "bbox": det.bbox,
+                                "label": f"person:{det.confidence:.2f}",
+                                "confidence": det.confidence,
+                            }
+                        )
+                    for obj in objects:
+                        annotations.append(
+                            {
+                                "bbox": obj.bbox,
+                                "label": f"{obj.object_type}:{obj.confidence:.2f}",
+                                "confidence": obj.confidence,
+                            }
+                        )
+                    if annotations:
+                        self.overlay_store.add_snapshot_all(
+                            state.room_id,
+                            state.camera_id,
+                            annotations,
+                            frame,
+                            timestamp=ts,
+                        )
             success = True
         except Exception as exc:
             error = f"exception:{exc}"
@@ -758,7 +749,7 @@ class PerceptionManager:
             return []
         detections: List[ObjectDetection] = []
         for det in detector.detect(frame):
-            obj = _map_yolo_label(det)
+            obj = self._map_yolo_label(det)
             if obj is None:
                 continue
             if not self._object_allowed(obj.object_type):
@@ -766,6 +757,25 @@ class PerceptionManager:
             obj.bbox = det.bbox
             detections.append(obj)
         return detections
+
+    def _map_yolo_label(self, det: YoloDetection) -> Optional[ObjectDetection]:
+        label = det.label
+        if label == "person":
+            return None
+        mapped = self.object_label_map.get(label)
+        if isinstance(mapped, dict):
+            object_type = mapped.get("object_type", label)
+            category = mapped.get("category", "other")
+            risk_level = mapped.get("risk_level", "low")
+            if isinstance(object_type, str) and object_type.strip():
+                return ObjectDetection(
+                    object_type=object_type.strip(),
+                    category=category if isinstance(category, str) else "other",
+                    risk_level=risk_level if isinstance(risk_level, str) else "low",
+                    confidence=det.confidence,
+                    bbox=det.bbox,
+                )
+        return _map_yolo_label(det)
 
     def _classify_object(
         self, area_ratio: float, aspect: float, brightness: float
