@@ -197,6 +197,8 @@ class Settings:
     perception_uniform_min_ratio: float
     perception_teacher_height_ratio: float
     perception_orientation_motion_threshold: float
+    perception_identity_min_interval_seconds: float
+    perception_identity_sticky_score: float
     perception_proximity_distance_ratio: float
     perception_proximity_duration_seconds: float
     perception_group_distance_ratio: float
@@ -208,6 +210,15 @@ class Settings:
     roster_path: str
     attendance_path: str
     face_similarity_threshold: float
+    face_det_min_score: float
+    face_enhance_enable: bool
+    face_enhance_gamma: float
+    face_enhance_clahe: bool
+    face_enhance_denoise: bool
+    face_enhance_sharpen: bool
+    face_enhance_upscale_enable: bool
+    face_enhance_upscale_min_dim: int
+    face_enhance_upscale_max_dim: int
     face_model_name: str
     face_model_root: Optional[str]
     face_ctx_id: int
@@ -292,6 +303,12 @@ class Settings:
         self.perception_orientation_motion_threshold = _get_float(
             "PERCEPTION_ORIENTATION_MOTION_THRESHOLD", 10.0
         )
+        self.perception_identity_min_interval_seconds = _get_float(
+            "PERCEPTION_IDENTITY_MIN_INTERVAL_SECONDS", 0.3
+        )
+        self.perception_identity_sticky_score = _get_float(
+            "PERCEPTION_IDENTITY_STICKY_SCORE", 0.4
+        )
         self.perception_proximity_distance_ratio = _get_float(
             "PERCEPTION_PROXIMITY_DISTANCE_RATIO", 0.15
         )
@@ -316,7 +333,22 @@ class Settings:
         self.roster_path = os.getenv("ROSTER_PATH", "data/roster.json")
         self.attendance_path = os.getenv("ATTENDANCE_PATH", "data/attendance.json")
         self.face_similarity_threshold = _get_float(
-            "FACE_SIMILARITY_THRESHOLD", 0.35
+            "FACE_SIMILARITY_THRESHOLD", 0.25
+        )
+        self.face_det_min_score = _get_float("FACE_DET_MIN_SCORE", 0.2)
+        self.face_enhance_enable = _get_bool("FACE_ENHANCE_ENABLE", True)
+        self.face_enhance_gamma = _get_float("FACE_ENHANCE_GAMMA", 1.6)
+        self.face_enhance_clahe = _get_bool("FACE_ENHANCE_CLAHE", True)
+        self.face_enhance_denoise = _get_bool("FACE_ENHANCE_DENOISE", False)
+        self.face_enhance_sharpen = _get_bool("FACE_ENHANCE_SHARPEN", False)
+        self.face_enhance_upscale_enable = _get_bool(
+            "FACE_ENHANCE_UPSCALE_ENABLE", True
+        )
+        self.face_enhance_upscale_min_dim = _get_int(
+            "FACE_ENHANCE_UPSCALE_MIN_DIM", 1080
+        )
+        self.face_enhance_upscale_max_dim = _get_int(
+            "FACE_ENHANCE_UPSCALE_MAX_DIM", 1920
         )
         self.face_model_name = os.getenv("FACE_MODEL_NAME", "buffalo_s")
         self.face_model_root = os.getenv("FACE_MODEL_ROOT", "") or None

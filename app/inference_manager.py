@@ -69,6 +69,8 @@ class InferenceManager:
         self._group_windows: Dict[int, GroupSignalWindow] = {}
         self._lock = threading.Lock()
         self._teacher_absence_threshold_seconds = 30.0
+        self._person_ids: Dict[int, str] = {}
+        self._person_roles: Dict[str, str] = {}
 
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
@@ -120,6 +122,7 @@ class InferenceManager:
             event_type,
             global_id,
         )
+        self._update_person_identity(event, global_id)
         if global_id is not None and event_type in ("person_detected", "person_tracked"):
             self._last_seen[global_id] = _get_float(event, "timestamp") or time.time()
         if event_type == "role_assigned" and global_id is not None:
@@ -135,6 +138,28 @@ class InferenceManager:
             if group_id is not None:
                 window = self._group_windows.setdefault(group_id, GroupSignalWindow())
                 window.events.append(event)
+
+    def _update_person_identity(
+        self, event: Dict[str, object], global_id: Optional[int]
+    ) -> None:
+        person_id = event.get("person_id")
+        if isinstance(person_id, str) and global_id is not None:
+            self._person_ids[global_id] = person_id
+        if isinstance(person_id, str):
+            role = event.get("person_role")
+            if not isinstance(role, str) and event.get("event_type") == "role_assigned":
+                role = event.get("role")
+            if isinstance(role, str):
+                self._person_roles[person_id] = role
+        if event.get("event_type") == "identity_resolved":
+            prev = event.get("previous_person_id")
+            if isinstance(prev, str) and isinstance(person_id, str):
+                role = event.get("person_role")
+                if isinstance(role, str):
+                    self._person_roles[person_id] = role
+
+    def _person_id_for_global(self, global_id: int) -> str:
+        return self._person_ids.get(global_id, f"unknown:{global_id}")
 
     def _evaluate(self) -> None:
         now = time.time()
@@ -199,6 +224,7 @@ class InferenceManager:
         output = {
             "timestamp": now,
             "type": "cheating_suspicion",
+            "student_person_id": self._person_id_for_global(global_id),
             "student_global_id": global_id,
             "score": score,
             "signals": signals,
@@ -222,7 +248,9 @@ class InferenceManager:
             return
 
         movement = _movement_distance(recent)
-        group_interactions = _count_group_membership(recent, global_id)
+        group_interactions = _count_group_membership(
+            recent, self._person_id_for_global(global_id)
+        )
         device_assoc = _count_object_association(recent, {"phone", "laptop", "tablet"})
         down_events = _count_head_down(recent)
 
@@ -236,6 +264,7 @@ class InferenceManager:
         output = {
             "timestamp": now,
             "type": "teacher_engagement",
+            "teacher_person_id": self._person_id_for_global(global_id),
             "teacher_global_id": global_id,
             "engagement_score": engagement,
             "activity_breakdown": {
@@ -262,7 +291,9 @@ class InferenceManager:
         if not recent:
             return
 
-        group_interactions = _count_group_membership(recent, global_id)
+        group_interactions = _count_group_membership(
+            recent, self._person_id_for_global(global_id)
+        )
         proximity = _count_proximity_close(recent)
         movement = _movement_distance(recent)
 
@@ -282,6 +313,7 @@ class InferenceManager:
         output = {
             "timestamp": now,
             "type": "participation_summary",
+            "student_person_id": self._person_id_for_global(global_id),
             "student_global_id": global_id,
             "participation_level": level,
             "confidence": min(1.0, 0.3 + score),
@@ -302,6 +334,7 @@ class InferenceManager:
         if not recent:
             return
         student_ids = set()
+        student_global_ids = set()
         best_duration = 0.0
         for e in recent:
             if e.get("event_type") != "proximity_event" or e.get("status") != "close":
@@ -313,7 +346,8 @@ class InferenceManager:
                 if gid == global_id:
                     continue
                 if self._roles.get(gid) == "student":
-                    student_ids.add(gid)
+                    student_ids.add(self._person_id_for_global(gid))
+                    student_global_ids.add(gid)
             best_duration = max(best_duration, _get_float(e, "duration_seconds"))
         if not student_ids:
             return
@@ -321,8 +355,10 @@ class InferenceManager:
         output = {
             "timestamp": now,
             "type": "teacher_student_interaction",
+            "teacher_person_id": self._person_id_for_global(global_id),
+            "student_person_ids": sorted(student_ids),
             "teacher_global_id": global_id,
-            "student_global_ids": sorted(student_ids),
+            "student_global_ids": sorted(student_global_ids),
             "duration_seconds": best_duration,
             "confidence": confidence,
             "time_window": self.teacher_window_seconds,
@@ -348,6 +384,7 @@ class InferenceManager:
         output = {
             "timestamp": now,
             "type": "teacher_absence",
+            "teacher_person_id": self._person_id_for_global(global_id),
             "teacher_global_id": global_id,
             "absence_seconds": absence,
             "confidence": min(1.0, 0.4 + min(0.6, absence / 120.0)),
@@ -375,14 +412,16 @@ class InferenceManager:
         )
         if not has_paper:
             return
-        related = _extract_related_ids(recent, global_id)
+        related = _extract_related_person_ids(recent, self._person_id_for_global(global_id))
         if not related:
             return
         output = {
             "timestamp": now,
             "type": "paper_interaction",
+            "student_person_id": self._person_id_for_global(global_id),
+            "related_person_ids": related,
             "student_global_id": global_id,
-            "related_global_ids": related,
+            "related_global_ids": _extract_related_ids(recent, global_id),
             "confidence": 0.5,
             "time_window": self.cheating_window_seconds,
         }
@@ -405,15 +444,17 @@ class InferenceManager:
         proximity = _count_proximity_close(recent)
         if movement < self.fight_motion_threshold or proximity < self.fight_proximity_threshold:
             return
-        involved = _extract_related_ids(recent, global_id)
+        involved = _extract_related_person_ids(recent, self._person_id_for_global(global_id))
         signals = ["rapid_motion", "close_proximity"]
         confidence = min(1.0, 0.4 + (movement / (self.fight_motion_threshold * 2.0)) * 0.3 + proximity * 0.1)
         output = {
             "timestamp": now,
             "type": "safety_suspicion",
             "category": "fight",
+            "person_id": self._person_id_for_global(global_id),
+            "related_person_ids": involved,
             "global_person_id": global_id,
-            "related_global_ids": involved,
+            "related_global_ids": _extract_related_ids(recent, global_id),
             "signals": signals,
             "confidence": min(1.0, confidence),
             "time_window": self.fight_window_seconds,
@@ -436,8 +477,12 @@ class InferenceManager:
         duration = _group_duration(recent)
         motion_intensity = _group_motion_intensity(recent)
         members = _group_members(recent)
-        student_members = [gid for gid in members if self._roles.get(gid) == "student"]
-        teacher_members = [gid for gid in members if self._roles.get(gid) == "teacher"]
+        student_members = [
+            pid for pid in members if self._person_roles.get(pid) == "student"
+        ]
+        teacher_members = [
+            pid for pid in members if self._person_roles.get(pid) == "teacher"
+        ]
 
         if duration < 5.0:
             level = "low"
@@ -467,7 +512,12 @@ class InferenceManager:
                 "timestamp": now,
                 "type": "group_collaboration",
                 "group_id": group_id,
-                "student_global_ids": sorted(student_members),
+                "student_person_ids": sorted(student_members),
+                "student_global_ids": [
+                    gid
+                    for gid, pid in self._person_ids.items()
+                    if pid in student_members
+                ],
                 "duration_seconds": duration,
                 "confidence": min(1.0, 0.4 + min(0.6, duration / 30.0) + motion_intensity * 0.2),
             }
@@ -483,7 +533,12 @@ class InferenceManager:
                 "timestamp": now,
                 "type": "student_group_interaction",
                 "group_id": group_id,
-                "student_global_ids": sorted(student_members),
+                "student_person_ids": sorted(student_members),
+                "student_global_ids": [
+                    gid
+                    for gid, pid in self._person_ids.items()
+                    if pid in student_members
+                ],
                 "duration_seconds": duration,
                 "confidence": min(1.0, 0.3 + min(0.6, duration / 30.0)),
             }
@@ -582,12 +637,12 @@ def _movement_distance(events: List[Dict[str, object]]) -> float:
     return distance
 
 
-def _count_group_membership(events: List[Dict[str, object]], global_id: int) -> int:
+def _count_group_membership(events: List[Dict[str, object]], person_id: str) -> int:
     count = 0
     for e in events:
         if e.get("event_type") in ("group_formed", "group_updated"):
-            members = e.get("members")
-            if isinstance(members, list) and global_id in members:
+            members = e.get("person_ids")
+            if isinstance(members, list) and person_id in members:
                 count += 1
     return count
 
@@ -601,18 +656,39 @@ def _group_duration(events: List[Dict[str, object]]) -> float:
     return max(durations) if durations else 0.0
 
 
-def _group_members(events: List[Dict[str, object]]) -> List[int]:
+def _group_members(events: List[Dict[str, object]]) -> List[str]:
     for e in reversed(events):
         if e.get("event_type") in ("group_formed", "group_updated"):
-            members = e.get("members")
+            members = e.get("person_ids")
             if isinstance(members, list):
-                return [m for m in members if isinstance(m, int)]
+                return [m for m in members if isinstance(m, str)]
     return []
 
 
 def _group_motion_intensity(events: List[Dict[str, object]]) -> float:
     counts = len([e for e in events if e.get("event_type") == "group_updated"])
     return min(1.0, counts / 5.0)
+
+
+def _extract_related_person_ids(events: List[Dict[str, object]], person_id: str) -> List[str]:
+    related = set()
+    for e in events:
+        if e.get("event_type") != "proximity_event":
+            continue
+        members = e.get("person_ids")
+        if isinstance(members, list):
+            if person_id in members:
+                for pid in members:
+                    if isinstance(pid, str) and pid != person_id:
+                        related.add(pid)
+            continue
+        gids = e.get("global_ids")
+        if isinstance(gids, list):
+            if any(isinstance(gid, int) and f"unknown:{gid}" == person_id for gid in gids):
+                for gid in gids:
+                    if isinstance(gid, int):
+                        related.add(f"unknown:{gid}")
+    return sorted(related)
 
 
 def _extract_related_ids(events: List[Dict[str, object]], global_id: int) -> List[int]:

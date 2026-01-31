@@ -155,6 +155,8 @@ class PerceptionManager:
         uniform_min_ratio: float,
         teacher_height_ratio: float,
         orientation_motion_threshold: float,
+        identity_min_interval_seconds: float,
+        identity_sticky_score: float,
         proximity_distance_ratio: float,
         proximity_duration_seconds: float,
         group_distance_ratio: float,
@@ -185,6 +187,8 @@ class PerceptionManager:
         self.uniform_min_ratio = uniform_min_ratio
         self.teacher_height_ratio = teacher_height_ratio
         self.orientation_motion_threshold = orientation_motion_threshold
+        self.identity_min_interval_seconds = max(0.05, identity_min_interval_seconds)
+        self.identity_sticky_score = max(0.0, min(1.0, identity_sticky_score))
         self.proximity_distance_ratio = proximity_distance_ratio
         self.proximity_duration_seconds = proximity_duration_seconds
         self.group_distance_ratio = group_distance_ratio
@@ -213,6 +217,7 @@ class PerceptionManager:
         )
         self._camera_order: List[Tuple[str, str]] = []
         self._camera_index = 0
+        self._person_id_map: Dict[str, str] = {}
         self._hog = cv2.HOGDescriptor()
         detector_fn = getattr(cv2, "HOGDescriptor_getDefaultPeopleDetector", None)
         if detector_fn is not None:
@@ -342,6 +347,23 @@ class PerceptionManager:
             camera_id = event.get("camera_id")
             if isinstance(room_id, str) and isinstance(camera_id, str):
                 self.overlay_store.add_event(room_id, camera_id, event, frame=frame)
+
+    @staticmethod
+    def _unknown_person_id(track: TrackState) -> Optional[str]:
+        if track.identity_id:
+            return None
+        if track.global_id is None:
+            return None
+        return f"unknown:{track.global_id}"
+
+    def _person_id_for_track(self, track: TrackState) -> Optional[str]:
+        if track.identity_id:
+            return track.identity_id
+        unknown_id = self._unknown_person_id(track)
+        if unknown_id is None:
+            return None
+        mapped = self._person_id_map.get(unknown_id)
+        return mapped or unknown_id
 
     def _run(self) -> None:
         while not self._stop_event.is_set():
@@ -555,6 +577,9 @@ class PerceptionManager:
                     {
                         "track_id": track.track_id,
                         "bbox": detection.bbox,
+                        "person_id": self._person_id_for_track(track),
+                        "person_name": track.identity_name,
+                        "person_role": track.identity_role,
                     },
                 )
             , frame=frame)
@@ -588,6 +613,9 @@ class PerceptionManager:
                     {
                         "track_id": track.track_id,
                         "bbox": detection.bbox,
+                        "person_id": self._person_id_for_track(track),
+                        "person_name": track.identity_name,
+                        "person_role": track.identity_role,
                     },
                 )
             , frame=frame)
@@ -607,7 +635,12 @@ class PerceptionManager:
                     "person_lost",
                     0.6,
                     track.global_id,
-                    {"track_id": track.track_id},
+                    {
+                        "track_id": track.track_id,
+                        "person_id": self._person_id_for_track(track),
+                        "person_name": track.identity_name,
+                        "person_role": track.identity_role,
+                    },
                 )
             )
 
@@ -622,7 +655,13 @@ class PerceptionManager:
                         "role_assigned",
                         track.role_confidence,
                         track.global_id,
-                        {"track_id": track.track_id, "role": track.role},
+                        {
+                            "track_id": track.track_id,
+                            "role": track.role,
+                            "person_id": self._person_id_for_track(track),
+                            "person_name": track.identity_name,
+                            "person_role": track.identity_role,
+                        },
                     )
                 , frame=frame)
             return
@@ -638,7 +677,13 @@ class PerceptionManager:
                     "role_assigned",
                     track.role_confidence,
                     track.global_id,
-                    {"track_id": track.track_id, "role": track.role},
+                    {
+                        "track_id": track.track_id,
+                        "role": track.role,
+                        "person_id": self._person_id_for_track(track),
+                        "person_name": track.identity_name,
+                        "person_role": track.identity_role,
+                    },
                 )
             , frame=frame)
             return
@@ -657,7 +702,13 @@ class PerceptionManager:
                         "role_assigned",
                         track.role_confidence,
                         track.global_id,
-                        {"track_id": track.track_id, "role": track.role},
+                        {
+                            "track_id": track.track_id,
+                            "role": track.role,
+                            "person_id": self._person_id_for_track(track),
+                            "person_name": track.identity_name,
+                            "person_role": track.identity_role,
+                        },
                     )
                 , frame=frame)
 
@@ -667,16 +718,38 @@ class PerceptionManager:
         if not faces:
             return
         now = time.time()
-        if now - track.last_identity_time < 2.0:
+        if now - track.last_identity_time < self.identity_min_interval_seconds:
+            return
+        if track.identity_id is not None and track.identity_score >= self.identity_sticky_score:
             return
         match = _match_face_to_track(faces, track.bbox)
         if match is None or match.person_id is None or match.name is None:
             return
+        unknown_id = self._unknown_person_id(track)
         track.identity_id = match.person_id
         track.identity_name = match.name
         track.identity_role = match.role
         track.identity_score = match.score
         track.last_identity_time = now
+        if unknown_id and unknown_id != match.person_id:
+            with self._lock:
+                mapped = self._person_id_map.get(unknown_id)
+                if mapped != match.person_id:
+                    self._person_id_map[unknown_id] = match.person_id
+                    self._emit(
+                        _event(
+                            state,
+                            "identity_resolved",
+                            max(0.5, match.score),
+                            track.global_id,
+                            {
+                                "person_id": match.person_id,
+                                "previous_person_id": unknown_id,
+                                "person_name": match.name,
+                                "person_role": match.role,
+                            },
+                        )
+                    )
         if self.attendance:
             self.attendance.mark_present(
                 person_id=match.person_id,
@@ -707,7 +780,13 @@ class PerceptionManager:
                     "head_orientation_changed",
                     0.5,
                     track.global_id,
-                    {"track_id": track.track_id, "orientation": orientation},
+                    {
+                        "track_id": track.track_id,
+                        "orientation": orientation,
+                        "person_id": self._person_id_for_track(track),
+                        "person_name": track.identity_name,
+                        "person_role": track.identity_role,
+                    },
                 )
             )
 
@@ -965,6 +1044,9 @@ class PerceptionManager:
                         "bbox": detection.bbox,
                         "priority": detection.object_type in self.object_priority,
                         "risky": detection.object_type in self.object_risky,
+                        "person_id": self._person_id_for_track(best_track),
+                        "person_name": best_track.identity_name,
+                        "person_role": best_track.identity_role,
                     },
                 )
             , frame=frame)
@@ -1034,6 +1116,10 @@ class PerceptionManager:
                                 {
                                     "track_ids": [t1.track_id, t2.track_id],
                                     "global_ids": [t1.global_id, t2.global_id],
+                                    "person_ids": [
+                                        self._person_id_for_track(t1),
+                                        self._person_id_for_track(t2),
+                                    ],
                                     "distance": dist,
                                     "status": "close",
                                     "duration_seconds": now - since,
@@ -1053,6 +1139,10 @@ class PerceptionManager:
                                 {
                                     "track_ids": [t1.track_id, t2.track_id],
                                     "global_ids": [t1.global_id, t2.global_id],
+                                    "person_ids": [
+                                        self._person_id_for_track(t1),
+                                        self._person_id_for_track(t2),
+                                    ],
                                     "distance": dist,
                                     "status": "separated",
                                     "duration_seconds": duration,
@@ -1073,8 +1163,12 @@ class PerceptionManager:
 
         active_keys = set()
         for group in groups:
-            if len(group) < 2:
+            if len(group) < 3:
                 continue
+            members_unique = _unique_values(t.global_id for t in group)
+            person_ids_unique = _unique_values(
+                self._person_id_for_track(t) for t in group
+            )
             member_ids: frozenset[int] = frozenset(t.track_id for t in group)
             active_keys.add(member_ids)
             existing = state.group_state.get(member_ids)
@@ -1094,7 +1188,9 @@ class PerceptionManager:
                             None,
                             {
                                 "group_id": group_id,
-                                "members": [t.global_id for t in group],
+                                "members": person_ids_unique,
+                                "person_ids": person_ids_unique,
+                                "member_global_ids": members_unique,
                                 "track_ids": [t.track_id for t in group],
                                 "duration_seconds": duration,
                             },
@@ -1110,7 +1206,9 @@ class PerceptionManager:
                             None,
                             {
                                 "group_id": group_id,
-                                "members": [t.global_id for t in group],
+                                "members": person_ids_unique,
+                                "person_ids": person_ids_unique,
+                                "member_global_ids": members_unique,
                                 "track_ids": [t.track_id for t in group],
                                 "duration_seconds": duration,
                             },
@@ -1145,11 +1243,15 @@ def _event(
     global_person_id: Optional[int],
     payload: Dict[str, object],
 ) -> Dict[str, object]:
+    person_id = payload.pop("person_id", None)
+    if person_id is None and global_person_id is not None:
+        person_id = f"unknown:{global_person_id}"
     data: Dict[str, object] = {
         "timestamp": time.time(),
         "room_id": state.room_id,
         "camera_id": state.camera_id,
         "global_person_id": global_person_id,
+        "person_id": person_id,
         "event_type": event_type,
         "confidence": float(max(0.0, min(1.0, confidence))),
     }
@@ -1160,6 +1262,19 @@ def _event(
 def _bbox_center(bbox: Tuple[int, int, int, int]) -> Tuple[float, float]:
     x1, y1, x2, y2 = bbox
     return ((x1 + x2) / 2.0, (y1 + y2) / 2.0)
+
+
+def _unique_values(values) -> List[object]:
+    seen = set()
+    output: List[object] = []
+    for value in values:
+        if value is None:
+            continue
+        if value in seen:
+            continue
+        seen.add(value)
+        output.append(value)
+    return output
 
 
 def _bbox_iou(a: Tuple[int, int, int, int], b: Tuple[int, int, int, int]) -> float:

@@ -1,0 +1,16 @@
+{
+  "people": [
+    {
+      "person_id": "octave-001",
+      "name": "octave",
+      "role": "student",
+      "images": ["data/roster_images/octave.jpeg"]
+    },
+    {
+      "person_id": "bonheur-001",
+      "name": "bonheur",
+      "role": "student",
+      "images": ["data/roster_images/bonheur.jpeg"]
+    }
+  ]
+}
