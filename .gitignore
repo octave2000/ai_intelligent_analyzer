@@ -13,3 +13,4 @@ models/
 *.zip
 yolov8n.pt
 yolov8s.pt
+overlay/

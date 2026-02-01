@@ -955,6 +955,7 @@ class PerceptionManager:
 
         matched_track_ids = set()
         matched_detection_ids = set()
+        detection_track_ids: Dict[int, int] = {}
 
         for det_idx, track_id in matches.items():
             detection = detections[det_idx]
@@ -964,6 +965,7 @@ class PerceptionManager:
             track.hits += 1
             matched_track_ids.add(track_id)
             matched_detection_ids.add(det_idx)
+            detection_track_ids[det_idx] = track_id
 
         for idx, detection in enumerate(detections):
             if idx in matched_detection_ids:
