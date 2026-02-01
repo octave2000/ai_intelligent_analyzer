@@ -2,7 +2,7 @@
   "room1": {
     "back": {
       "role": "back",
-      "url": "rtsp://100.69.127.78:8554/camera2"
+      "url": "rtsp://13.244.61.225:8554/camera2"
     }
   }
 }

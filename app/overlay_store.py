@@ -137,12 +137,10 @@ class OverlayStore:
             ts = int(_get_float(event, "timestamp"))
             grouped.setdefault(ts, []).append(event)
         for ts, bucket in grouped.items():
-            file_path = os.path.join(dir_path, f"{ts}.jsonl")
+            file_path = os.path.join(dir_path, f"{ts}.json")
             tmp_path = f"{file_path}.tmp"
             with open(tmp_path, "w", encoding="utf-8") as handle:
-                for event in bucket:
-                    handle.write(json.dumps(event, separators=(",", ":")))
-                    handle.write("\n")
+                json.dump(bucket, handle, separators=(",", ":"))
             os.replace(tmp_path, file_path)
             self._append_index(dir_path, ts, bucket)
             logger.info(
