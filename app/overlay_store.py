@@ -301,19 +301,26 @@ class OverlayStore:
 
     def _append_index(self, dir_path: str, ts: int, events: list) -> None:
         date_key = time.strftime("%Y-%m-%d", time.localtime(ts))
-        index_path = os.path.join(dir_path, f"index-{date_key}.jsonl")
+        index_path = os.path.join(dir_path, f"index-{date_key}.json")
         try:
-            with open(index_path, "a", encoding="utf-8") as handle:
-                for event in events:
-                    payload = {
+            existing = []
+            if os.path.exists(index_path):
+                with open(index_path, "r", encoding="utf-8") as handle:
+                    payload = json.load(handle)
+                    if isinstance(payload, list):
+                        existing = payload
+            for event in events:
+                existing.append(
+                    {
                         "timestamp": ts,
                         "event_type": event.get("event_type"),
                         "global_person_id": event.get("global_person_id"),
                         "confidence": event.get("confidence"),
-                        "file": f"{ts}.jsonl",
+                        "file": f"{ts}.json",
                     }
-                    handle.write(json.dumps(payload, separators=(",", ":")))
-                    handle.write("\n")
+                )
+            with open(index_path, "w", encoding="utf-8") as handle:
+                json.dump(existing, handle, separators=(",", ":"))
         except Exception as exc:
             logger.warning("overlay_store.index_failed path=%s error=%s", index_path, exc)
 
@@ -339,11 +346,11 @@ class OverlayStore:
                 if not os.path.isdir(cam_path):
                     continue
                 for name in os.listdir(cam_path):
-                    if not name.endswith(".jsonl"):
+                    if not name.endswith(".json"):
                         continue
                     full_path = os.path.join(cam_path, name)
                     if name.startswith("index-"):
-                        date_part = name[len("index-") : -len(".jsonl")]
+                        date_part = name[len("index-") : -len(".json")]
                         try:
                             date_ts = time.mktime(time.strptime(date_part, "%Y-%m-%d"))
                         except Exception:
@@ -355,7 +362,7 @@ class OverlayStore:
                                 pass
                         continue
                     try:
-                        ts = int(name[:-len(".jsonl")])
+                        ts = int(name[:-len(".json")])
                     except ValueError:
                         continue
                     if ts < cutoff:
@@ -370,12 +377,6 @@ class OverlayStore:
             buf.events.popleft()
 
     def _should_store_event(self, event: Dict[str, object]) -> bool:
-        event_type = event.get("event_type")
-        confidence = _get_float(event, "confidence")
-        if isinstance(event_type, str) and event_type.startswith("person_"):
-            return confidence >= self._person_conf_threshold
-        if event_type in ("object_detected", "object_associated"):
-            return confidence >= self._object_conf_threshold
         return True
 
 

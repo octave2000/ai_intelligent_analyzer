@@ -553,6 +553,7 @@ class PerceptionManager:
 
         matched_track_ids = set()
         matched_detection_ids = set()
+        detection_track_ids: Dict[int, int] = {}
 
         for det_idx, track_id in matches.items():
             detection = detections[det_idx]
@@ -587,6 +588,7 @@ class PerceptionManager:
             self._update_orientation(state, track)
             matched_track_ids.add(track_id)
             matched_detection_ids.add(det_idx)
+            detection_track_ids[det_idx] = track_id
 
         for idx, detection in enumerate(detections):
             if idx in matched_detection_ids:
@@ -968,8 +970,14 @@ class PerceptionManager:
                 continue
             track_id = state.next_object_id
             state.next_object_id += 1
-            track = ObjectTrack(track_id=track_id, detection=detection, last_seen=now, hits=1)
+            track = ObjectTrack(
+                track_id=track_id,
+                detection=detection,
+                last_seen=now,
+                hits=1,
+            )
             tracks[track_id] = track
+            detection_track_ids[idx] = track_id
 
         expired = [
             track_id
@@ -979,27 +987,25 @@ class PerceptionManager:
         for track_id in expired:
             tracks.pop(track_id, None)
 
-        for track in tracks.values():
-            if track.hits >= self.object_persist_frames and not track.emitted:
-                track.emitted = True
-                detection = self._apply_object_flags(track.detection)
-                self._emit(
-                    _event(
-                        state,
-                        "object_detected",
-                        detection.confidence,
-                        None,
-                        {
-                            "object_type": detection.object_type,
-                            "category": detection.category,
-                            "risk_level": detection.risk_level,
-                            "bbox": detection.bbox,
-                            "object_track_id": track.track_id,
-                            "priority": detection.object_type in self.object_priority,
-                            "risky": detection.object_type in self.object_risky,
-                        },
-                    )
-                , frame=frame)
+        for det_idx, detection in enumerate(detections):
+            detection = self._apply_object_flags(detection)
+            self._emit(
+                _event(
+                    state,
+                    "object_detected",
+                    detection.confidence,
+                    None,
+                    {
+                        "object_type": detection.object_type,
+                        "category": detection.category,
+                        "risk_level": detection.risk_level,
+                        "bbox": detection.bbox,
+                        "object_track_id": detection_track_ids.get(det_idx),
+                        "priority": detection.object_type in self.object_priority,
+                        "risky": detection.object_type in self.object_risky,
+                    },
+                )
+            , frame=frame)
 
     def _associate_objects(
         self,
@@ -1009,8 +1015,6 @@ class PerceptionManager:
         if not state.tracks or not state.object_tracks:
             return
         for obj_track in state.object_tracks.values():
-            if obj_track.hits < self.object_persist_frames:
-                continue
             best_track = None
             best_score = 0.0
             for track in state.tracks.values():
@@ -1020,14 +1024,6 @@ class PerceptionManager:
                     best_track = track
             if best_track is None:
                 continue
-            if best_score < 0.05:
-                continue
-            key: Tuple[int, int] = (obj_track.track_id, best_track.track_id)
-            last_emit = state.association_last.get(key, 0.0)
-            now = time.time()
-            if now - last_emit < 2.0:
-                continue
-            state.association_last[key] = now
             detection = self._apply_object_flags(obj_track.detection)
             self._emit(
                 _event(
@@ -1061,8 +1057,6 @@ class PerceptionManager:
             if area <= 0:
                 continue
             if area < 3000:
-                if not self._object_allowed("concealed_paper"):
-                    continue
                 self._emit(
                     _event(
                         state,
@@ -1220,9 +1214,7 @@ class PerceptionManager:
                 state.group_state.pop(key, None)
 
     def _object_allowed(self, object_type: str) -> bool:
-        if not self.object_allowlist:
-            return True
-        return object_type in self.object_allowlist
+        return True
 
     def _apply_object_flags(self, detection: ObjectDetection) -> ObjectDetection:
         if detection.object_type in self.object_risky and detection.risk_level != "high":
