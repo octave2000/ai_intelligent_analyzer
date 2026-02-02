@@ -58,6 +58,7 @@ class OverlayStore:
         self._person_conf_threshold = max(0.0, min(1.0, person_conf_threshold))
         self._object_conf_threshold = max(0.0, min(1.0, object_conf_threshold))
         self._last_cleanup = 0.0
+        self._last_event_ts: Dict[str, Dict[str, int]] = {}
 
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
@@ -112,7 +113,10 @@ class OverlayStore:
                     self._prune_locked(buf, now)
                     if now - buf.last_flush >= self.flush_interval_seconds:
                         buf.last_flush = now
-                        to_flush.append((room_id, camera_id, list(buf.events)))
+                        pending = list(buf.events)
+                        if pending:
+                            to_flush.append((room_id, camera_id, pending))
+                            buf.events.clear()
         for room_id, camera_id, events in to_flush:
             self._write_events(room_id, camera_id, events)
 
@@ -136,11 +140,35 @@ class OverlayStore:
         for event in events:
             ts = int(_get_float(event, "timestamp"))
             grouped.setdefault(ts, []).append(event)
+        if not grouped:
+            return
         for ts, bucket in grouped.items():
+            last_ts = self._last_event_ts.setdefault(room_id, {}).get(camera_id)
+            if last_ts is not None and ts > last_ts + 1:
+                missing = (ts - last_ts) - 1
+                logger.info(
+                    "overlay_store.missing_seconds room_id=%s camera_id=%s last_ts=%s next_ts=%s missing=%s reason=no_events",
+                    room_id,
+                    camera_id,
+                    last_ts,
+                    ts,
+                    missing,
+                )
+            self._last_event_ts.setdefault(room_id, {})[camera_id] = ts
             file_path = os.path.join(dir_path, f"{ts}.json")
             tmp_path = f"{file_path}.tmp"
+            existing: list = []
+            if os.path.exists(file_path):
+                try:
+                    with open(file_path, "r", encoding="utf-8") as handle:
+                        loaded = json.load(handle)
+                    if isinstance(loaded, list):
+                        existing = loaded
+                except Exception:
+                    existing = []
+            payload = existing + bucket
             with open(tmp_path, "w", encoding="utf-8") as handle:
-                json.dump(bucket, handle, separators=(",", ":"))
+                json.dump(payload, handle, separators=(",", ":"))
             os.replace(tmp_path, file_path)
             self._append_index(dir_path, ts, bucket)
             logger.info(

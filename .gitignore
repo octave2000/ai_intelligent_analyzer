@@ -14,3 +14,8 @@ models/
 yolov8n.pt
 yolov8s.pt
 overlay/
+overlay_2/
+overlay_3/
+overlay_snapshots
+overlay_snapshots_2/
+overlay_snapshots_3/

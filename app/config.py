@@ -207,6 +207,7 @@ class Settings:
     perception_detection_height: int
     perception_exam_mode: bool
     perception_max_cameras_per_tick: int
+    perception_dual_detect_test: bool
     roster_path: str
     attendance_path: str
     face_similarity_threshold: float
@@ -224,6 +225,8 @@ class Settings:
     face_ctx_id: int
     yolo_mode: str
     yolo_model_path: str
+    yolo_model_path_2: str
+    yolo_model_path_3: str
     yolo_conf_threshold: float
     yolo_iou_threshold: float
     yolo_device: str
@@ -236,6 +239,10 @@ class Settings:
     overlay_cleanup_interval_seconds: float
     overlay_snapshot_enabled: bool
     overlay_snapshot_path: str
+    overlay_path_2: str
+    overlay_path_3: str
+    overlay_snapshot_path_2: str
+    overlay_snapshot_path_3: str
     overlay_snapshot_all: bool
     overlay_snapshot_min_interval_seconds: float
     rtsp_transport: str
@@ -326,6 +333,9 @@ class Settings:
         self.perception_max_cameras_per_tick = _get_int(
             "PERCEPTION_MAX_CAMERAS_PER_TICK", 8
         )
+        self.perception_dual_detect_test = _get_bool(
+            "PERCEPTION_DUAL_DETECT_TEST", False
+        )
         self.mode_config_path = "data/modes.json"
         self.perception_exam_mode = _load_mode_config(
             self.mode_config_path, default_exam_mode=False
@@ -355,6 +365,8 @@ class Settings:
         self.face_ctx_id = _get_face_ctx_id("FACE_CTX_ID", "auto")
         self.yolo_mode = _get_mode("USE_YOLO", "auto")
         self.yolo_model_path = os.getenv("YOLO_MODEL_PATH", "yolov8n.pt")
+        self.yolo_model_path_2 = os.getenv("YOLO_MODEL_PATH_2", self.yolo_model_path)
+        self.yolo_model_path_3 = os.getenv("YOLO_MODEL_PATH_3", self.yolo_model_path)
         self.yolo_conf_threshold = _get_float("YOLO_CONF_THRESHOLD", 0.35)
         self.yolo_iou_threshold = _get_float("YOLO_IOU_THRESHOLD", 0.45)
         self.yolo_device = os.getenv("YOLO_DEVICE", "auto").strip().lower()
@@ -380,6 +392,14 @@ class Settings:
         )
         self.overlay_snapshot_path = os.getenv(
             "OVERLAY_SNAPSHOT_PATH", "data/overlay_snapshots"
+        )
+        self.overlay_path_2 = os.getenv("OVERLAY_PATH_2", "data/overlay_2")
+        self.overlay_path_3 = os.getenv("OVERLAY_PATH_3", "data/overlay_3")
+        self.overlay_snapshot_path_2 = os.getenv(
+            "OVERLAY_SNAPSHOT_PATH_2", "data/overlay_snapshots_2"
+        )
+        self.overlay_snapshot_path_3 = os.getenv(
+            "OVERLAY_SNAPSHOT_PATH_3", "data/overlay_snapshots_3"
         )
         self.overlay_snapshot_all = _get_bool("OVERLAY_SNAPSHOT_ALL", False)
         self.overlay_snapshot_min_interval_seconds = _get_float(

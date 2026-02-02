@@ -165,6 +165,8 @@ class PerceptionManager:
         detection_height: int,
         exam_mode: bool,
         max_cameras_per_tick: int,
+        dual_detect_test: bool,
+        pipeline_tag: str = "p1",
         face_identifier: Optional[FaceIdentifier] = None,
         attendance: Optional[AttendanceManager] = None,
         yolo_detector: Optional[YoloDetector] = None,
@@ -197,6 +199,8 @@ class PerceptionManager:
         self.detection_height = detection_height
         self.exam_mode = exam_mode
         self.max_cameras_per_tick = max(1, max_cameras_per_tick)
+        self.dual_detect_test = dual_detect_test
+        self.pipeline_tag = pipeline_tag
         self.face_identifier = face_identifier
         self.attendance = attendance
         self.yolo_detector = yolo_detector
@@ -335,6 +339,7 @@ class PerceptionManager:
         event: Dict[str, object],
         frame: Optional["cv2.typing.MatLike"] = None,
     ) -> None:
+        event["pipeline"] = self.pipeline_tag
         self._events.append(event)
         logger.info(
             "perception.event room_id=%s camera_id=%s event_type=%s",
@@ -386,6 +391,11 @@ class PerceptionManager:
                     continue
                 interval = self.active_interval_seconds
                 if now - state.last_run < interval:
+                    logger.info(
+                        "perception.skip room_id=%s camera_id=%s reason=interval_throttle",
+                        room_id,
+                        camera_id,
+                    )
                     continue
                 state.last_run = now
                 logger.debug(
@@ -398,6 +408,13 @@ class PerceptionManager:
             with self._lock:
                 if total > 0:
                     self._camera_index = idx
+                if total > processed and processed >= self.max_cameras_per_tick:
+                    logger.info(
+                        "perception.skip reason=camera_throttled total=%d processed=%d max_per_tick=%d",
+                        total,
+                        processed,
+                        self.max_cameras_per_tick,
+                    )
 
             time.sleep(0.1)
 
@@ -410,16 +427,16 @@ class PerceptionManager:
         try:
             frame, ts = self.stream_manager.get_snapshot(state.room_id, state.camera_id)
             if frame is None or ts is None:
-                logger.debug(
-                    "perception.frame_missing room_id=%s camera_id=%s",
+                logger.info(
+                    "perception.skip room_id=%s camera_id=%s reason=frame_missing",
                     state.room_id,
                     state.camera_id,
                 )
                 error = "frame_missing"
                 return
             if time.time() - ts > self.stale_seconds:
-                logger.debug(
-                    "perception.frame_stale room_id=%s camera_id=%s",
+                logger.info(
+                    "perception.skip room_id=%s camera_id=%s reason=frame_stale",
                     state.room_id,
                     state.camera_id,
                 )
@@ -440,12 +457,30 @@ class PerceptionManager:
             )
 
             detections = self._detect_people(frame)
+            secondary_people: Optional[List[Detection]] = None
+            if self.dual_detect_test:
+                if self.yolo_detector is not None and self.yolo_detector.ready():
+                    secondary_people = self._detect_people_hog(frame)
+                else:
+                    secondary_people = (
+                        self._detect_people_yolo(frame)
+                        if self.yolo_detector is not None
+                        else []
+                    )
             logger.debug(
                 "perception.detect_people room_id=%s camera_id=%s count=%d",
                 state.room_id,
                 state.camera_id,
                 len(detections),
             )
+            if secondary_people is not None:
+                logger.info(
+                    "perception.dual_detect room_id=%s camera_id=%s primary=%d secondary=%d",
+                    state.room_id,
+                    state.camera_id,
+                    len(detections),
+                    len(secondary_people),
+                )
             with state.lock:
                 self._update_tracks(state, frame, detections, faces)
                 objects = self._detect_objects(frame)
@@ -459,6 +494,28 @@ class PerceptionManager:
                 self._associate_objects(state, frame)
                 self._update_proximity(state)
                 self._update_groups(state)
+                if not detections and not objects:
+                    logger.info(
+                        "perception.skip room_id=%s camera_id=%s reason=no_detections",
+                        state.room_id,
+                        state.camera_id,
+                    )
+                self._emit(
+                    _event(
+                        state,
+                        "frame_tick",
+                        1.0,
+                        None,
+                        {
+                            "frame_timestamp": ts,
+                            "detections_count": len(detections),
+                            "objects_count": len(objects),
+                            "secondary_detections_count": len(secondary_people)
+                            if secondary_people is not None
+                            else None,
+                        },
+                    )
+                )
                 if self.overlay_store is not None:
                     annotations = []
                     for det in detections:
@@ -515,12 +572,18 @@ class PerceptionManager:
     def _detect_people(self, frame: "cv2.typing.MatLike") -> List[Detection]:
         detector = self.yolo_detector
         if detector is not None and detector.ready():
-            detections = []
-            for det in detector.detect(frame):
-                if det.label:  # defensive
-                    if det.label == "person":
-                        detections.append(Detection(det.bbox, det.confidence))
-            return detections
+            return self._detect_people_yolo(frame)
+        return self._detect_people_hog(frame)
+
+    def _detect_people_yolo(self, frame: "cv2.typing.MatLike") -> List[Detection]:
+        detections: List[Detection] = []
+        for det in self.yolo_detector.detect(frame):
+            if det.label:  # defensive
+                if det.label == "person":
+                    detections.append(Detection(det.bbox, det.confidence))
+        return detections
+
+    def _detect_people_hog(self, frame: "cv2.typing.MatLike") -> List[Detection]:
         h, w = frame.shape[:2]
         scale_x = w / float(self.detection_width)
         scale_y = h / float(self.detection_height)
