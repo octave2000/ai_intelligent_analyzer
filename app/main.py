@@ -60,32 +60,6 @@ def create_app() -> FastAPI:
         snapshot_all=settings.overlay_snapshot_all,
         snapshot_min_interval_seconds=settings.overlay_snapshot_min_interval_seconds,
     )
-    overlay_store_2 = OverlayStore(
-        root_path=settings.overlay_path_2,
-        retention_seconds=settings.overlay_retention_seconds,
-        flush_interval_seconds=settings.overlay_flush_interval_seconds,
-        person_conf_threshold=settings.overlay_person_conf_threshold,
-        object_conf_threshold=settings.overlay_object_conf_threshold,
-        disk_retention_seconds=settings.overlay_disk_retention_seconds,
-        cleanup_interval_seconds=settings.overlay_cleanup_interval_seconds,
-        snapshot_enabled=settings.overlay_snapshot_enabled,
-        snapshot_path=settings.overlay_snapshot_path_2,
-        snapshot_all=settings.overlay_snapshot_all,
-        snapshot_min_interval_seconds=settings.overlay_snapshot_min_interval_seconds,
-    )
-    overlay_store_3 = OverlayStore(
-        root_path=settings.overlay_path_3,
-        retention_seconds=settings.overlay_retention_seconds,
-        flush_interval_seconds=settings.overlay_flush_interval_seconds,
-        person_conf_threshold=settings.overlay_person_conf_threshold,
-        object_conf_threshold=settings.overlay_object_conf_threshold,
-        disk_retention_seconds=settings.overlay_disk_retention_seconds,
-        cleanup_interval_seconds=settings.overlay_cleanup_interval_seconds,
-        snapshot_enabled=settings.overlay_snapshot_enabled,
-        snapshot_path=settings.overlay_snapshot_path_3,
-        snapshot_all=settings.overlay_snapshot_all,
-        snapshot_min_interval_seconds=settings.overlay_snapshot_min_interval_seconds,
-    )
     face_identifier = FaceIdentifier(
         roster_path=settings.roster_path,
         similarity_threshold=settings.face_similarity_threshold,
@@ -103,23 +77,11 @@ def create_app() -> FastAPI:
         ctx_id=settings.face_ctx_id,
     )
     yolo_detector_1 = _build_yolo_detector(settings.yolo_model_path)
-    yolo_detector_2 = _build_yolo_detector(settings.yolo_model_path_2)
-    yolo_detector_3 = _build_yolo_detector(settings.yolo_model_path_3)
     logger = logging.getLogger(__name__)
     logger.info(
         "yolo_detector.pipeline pipeline=p1 enabled=%s model_path=%s",
         yolo_detector_1 is not None,
         settings.yolo_model_path,
-    )
-    logger.info(
-        "yolo_detector.pipeline pipeline=p2 enabled=%s model_path=%s",
-        yolo_detector_2 is not None,
-        settings.yolo_model_path_2,
-    )
-    logger.info(
-        "yolo_detector.pipeline pipeline=p3 enabled=%s model_path=%s",
-        yolo_detector_3 is not None,
-        settings.yolo_model_path_3,
     )
     perception_1 = PerceptionManager(
         stream_manager=manager,
@@ -158,83 +120,7 @@ def create_app() -> FastAPI:
         object_risky=settings.object_risky,
         object_label_map=settings.object_label_map,
     )
-    perception_2 = PerceptionManager(
-        stream_manager=manager,
-        active_interval_seconds=settings.perception_active_interval_seconds,
-        stale_seconds=settings.perception_stale_seconds,
-        track_ttl_seconds=settings.perception_track_ttl_seconds,
-        object_ttl_seconds=settings.perception_object_ttl_seconds,
-        object_persist_frames=settings.perception_object_persist_frames,
-        person_iou_threshold=settings.perception_person_iou_threshold,
-        object_iou_threshold=settings.perception_object_iou_threshold,
-        global_similarity_threshold=settings.perception_global_similarity_threshold,
-        global_max_age_seconds=settings.perception_global_max_age_seconds,
-        uniform_hsv_low=settings.perception_uniform_hsv_low,
-        uniform_hsv_high=settings.perception_uniform_hsv_high,
-        uniform_min_ratio=settings.perception_uniform_min_ratio,
-        teacher_height_ratio=settings.perception_teacher_height_ratio,
-        orientation_motion_threshold=settings.perception_orientation_motion_threshold,
-        identity_min_interval_seconds=settings.perception_identity_min_interval_seconds,
-        identity_sticky_score=settings.perception_identity_sticky_score,
-        proximity_distance_ratio=settings.perception_proximity_distance_ratio,
-        proximity_duration_seconds=settings.perception_proximity_duration_seconds,
-        group_distance_ratio=settings.perception_group_distance_ratio,
-        group_duration_seconds=settings.perception_group_duration_seconds,
-        detection_width=settings.perception_detection_width,
-        detection_height=settings.perception_detection_height,
-        exam_mode=settings.perception_exam_mode,
-        max_cameras_per_tick=settings.perception_max_cameras_per_tick,
-        dual_detect_test=False,
-        pipeline_tag="p2",
-        face_identifier=face_identifier,
-        attendance=attendance,
-        yolo_detector=yolo_detector_2,
-        overlay_store=overlay_store_2,
-        object_allowlist=settings.object_allowlist,
-        object_priority=settings.object_priority,
-        object_risky=settings.object_risky,
-        object_label_map=settings.object_label_map,
-    )
-    perception_3 = PerceptionManager(
-        stream_manager=manager,
-        active_interval_seconds=settings.perception_active_interval_seconds,
-        stale_seconds=settings.perception_stale_seconds,
-        track_ttl_seconds=settings.perception_track_ttl_seconds,
-        object_ttl_seconds=settings.perception_object_ttl_seconds,
-        object_persist_frames=settings.perception_object_persist_frames,
-        person_iou_threshold=settings.perception_person_iou_threshold,
-        object_iou_threshold=settings.perception_object_iou_threshold,
-        global_similarity_threshold=settings.perception_global_similarity_threshold,
-        global_max_age_seconds=settings.perception_global_max_age_seconds,
-        uniform_hsv_low=settings.perception_uniform_hsv_low,
-        uniform_hsv_high=settings.perception_uniform_hsv_high,
-        uniform_min_ratio=settings.perception_uniform_min_ratio,
-        teacher_height_ratio=settings.perception_teacher_height_ratio,
-        orientation_motion_threshold=settings.perception_orientation_motion_threshold,
-        identity_min_interval_seconds=settings.perception_identity_min_interval_seconds,
-        identity_sticky_score=settings.perception_identity_sticky_score,
-        proximity_distance_ratio=settings.perception_proximity_distance_ratio,
-        proximity_duration_seconds=settings.perception_proximity_duration_seconds,
-        group_distance_ratio=settings.perception_group_distance_ratio,
-        group_duration_seconds=settings.perception_group_duration_seconds,
-        detection_width=settings.perception_detection_width,
-        detection_height=settings.perception_detection_height,
-        exam_mode=settings.perception_exam_mode,
-        max_cameras_per_tick=settings.perception_max_cameras_per_tick,
-        dual_detect_test=False,
-        pipeline_tag="p3",
-        face_identifier=face_identifier,
-        attendance=attendance,
-        yolo_detector=yolo_detector_3,
-        overlay_store=overlay_store_3,
-        object_allowlist=settings.object_allowlist,
-        object_priority=settings.object_priority,
-        object_risky=settings.object_risky,
-        object_label_map=settings.object_label_map,
-    )
     perception_1.bootstrap_from_stream_manager()
-    perception_2.bootstrap_from_stream_manager()
-    perception_3.bootstrap_from_stream_manager()
     inference = InferenceManager(
         perception=perception_1,
         exam_mode=settings.perception_exam_mode,
@@ -255,23 +141,15 @@ def create_app() -> FastAPI:
     def _startup() -> None:
         manager.start()
         perception_1.start()
-        perception_2.start()
-        perception_3.start()
         inference.start()
         overlay_store.start()
-        overlay_store_2.start()
-        overlay_store_3.start()
 
     @app.on_event("shutdown")
     def _shutdown() -> None:
         manager.stop()
         perception_1.stop()
-        perception_2.stop()
-        perception_3.stop()
         inference.stop()
         overlay_store.stop()
-        overlay_store_2.stop()
-        overlay_store_3.stop()
 
     app.include_router(
         build_router(
