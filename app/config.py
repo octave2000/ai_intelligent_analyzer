@@ -185,6 +185,7 @@ class Settings:
     storage_path: str
     perception_active_interval_seconds: float
     perception_stale_seconds: float
+    event_max_frame_age_seconds: float
     perception_track_ttl_seconds: float
     perception_object_ttl_seconds: float
     perception_object_persist_frames: int
@@ -278,6 +279,10 @@ class Settings:
             "PERCEPTION_ACTIVE_INTERVAL_SECONDS", 2.0
         )
         self.perception_stale_seconds = _get_float("PERCEPTION_STALE_SECONDS", 2.5)
+        self.event_max_frame_age_seconds = _get_float(
+            "EVENT_MAX_FRAME_AGE_SECONDS",
+            self.perception_stale_seconds,
+        )
         self.perception_track_ttl_seconds = _get_float("PERCEPTION_TRACK_TTL_SECONDS", 2.5)
         self.perception_object_ttl_seconds = _get_float("PERCEPTION_OBJECT_TTL_SECONDS", 3.0)
         self.perception_object_persist_frames = _get_int(

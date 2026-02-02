@@ -76,6 +76,8 @@ class CameraPerceptionState:
     next_track_id: int = 1
     next_object_id: int = 1
     last_run: float = 0.0
+    last_frame_timestamp: Optional[float] = None
+    last_frame_age_seconds: Optional[float] = None
     lock: threading.Lock = field(default_factory=threading.Lock)
     proximity_state: Dict[Tuple[int, int], Tuple[bool, float, bool]] = field(default_factory=dict)
     group_state: Dict[frozenset, Tuple[int, float, bool]] = field(default_factory=dict)
@@ -165,6 +167,7 @@ class PerceptionManager:
         detection_height: int,
         exam_mode: bool,
         max_cameras_per_tick: int,
+        event_max_frame_age_seconds: float,
         dual_detect_test: bool,
         pipeline_tag: str = "p1",
         face_identifier: Optional[FaceIdentifier] = None,
@@ -199,6 +202,7 @@ class PerceptionManager:
         self.detection_height = detection_height
         self.exam_mode = exam_mode
         self.max_cameras_per_tick = max(1, max_cameras_per_tick)
+        self.event_max_frame_age_seconds = max(0.0, event_max_frame_age_seconds)
         self.dual_detect_test = dual_detect_test
         self.pipeline_tag = pipeline_tag
         self.face_identifier = face_identifier
@@ -434,7 +438,8 @@ class PerceptionManager:
                 )
                 error = "frame_missing"
                 return
-            if time.time() - ts > self.stale_seconds:
+            frame_age_seconds = time.time() - ts
+            if frame_age_seconds > self.stale_seconds:
                 logger.info(
                     "perception.skip room_id=%s camera_id=%s reason=frame_stale",
                     state.room_id,
@@ -442,6 +447,22 @@ class PerceptionManager:
                 )
                 error = "frame_stale"
                 return
+            if (
+                self.event_max_frame_age_seconds > 0.0
+                and frame_age_seconds > self.event_max_frame_age_seconds
+            ):
+                logger.info(
+                    "perception.skip room_id=%s camera_id=%s reason=frame_too_old age=%.3f max_age=%.3f",
+                    state.room_id,
+                    state.camera_id,
+                    frame_age_seconds,
+                    self.event_max_frame_age_seconds,
+                )
+                error = "frame_too_old"
+                return
+            with state.lock:
+                state.last_frame_timestamp = ts
+                state.last_frame_age_seconds = frame_age_seconds
 
             faces: List[FaceMatch] = []
             if self.face_identifier and self.face_identifier.ready():
@@ -1312,6 +1333,10 @@ def _event(
         "event_type": event_type,
         "confidence": float(max(0.0, min(1.0, confidence))),
     }
+    if state.last_frame_timestamp is not None:
+        data["frame_timestamp"] = state.last_frame_timestamp
+    if state.last_frame_age_seconds is not None:
+        data["frame_age_seconds"] = state.last_frame_age_seconds
     data.update(payload)
     return data
 
