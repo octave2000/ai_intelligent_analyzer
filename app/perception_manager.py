@@ -1324,8 +1324,13 @@ def _event(
     person_id = payload.pop("person_id", None)
     if person_id is None and global_person_id is not None:
         person_id = f"unknown:{global_person_id}"
+    timestamp = (
+        state.last_frame_timestamp
+        if state.last_frame_timestamp is not None
+        else time.time()
+    )
     data: Dict[str, object] = {
-        "timestamp": time.time(),
+        "timestamp": timestamp,
         "room_id": state.room_id,
         "camera_id": state.camera_id,
         "global_person_id": global_person_id,
