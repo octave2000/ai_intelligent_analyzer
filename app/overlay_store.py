@@ -187,7 +187,8 @@ class OverlayStore:
         event: Dict[str, object],
         frame: "cv2.typing.MatLike",
     ) -> None:
-        ts = int(_get_float(event, "timestamp"))
+        ts_raw = _get_float(event, "timestamp")
+        ts = int(ts_raw)
         try:
             image = frame.copy()
         except Exception:
@@ -196,6 +197,7 @@ class OverlayStore:
         gid = event.get("global_person_id")
         if gid is not None:
             label = f"{label}:gid={gid}"
+        label = f"{label}@{ts_raw:.2f}"
         annotation = {
             "bbox": event.get("bbox"),
             "label": label,
@@ -256,6 +258,18 @@ class OverlayStore:
             image = buf.frame.copy()
         except Exception:
             return
+        try:
+            cv2.putText(
+                image,
+                time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(ts)),
+                (10, 20),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.6,
+                (0, 220, 255),
+                2,
+            )
+        except Exception:
+            pass
         for ann in buf.annotations:
             bbox = ann.get("bbox")
             if isinstance(bbox, (list, tuple)) and len(bbox) == 4:

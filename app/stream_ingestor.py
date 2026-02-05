@@ -148,15 +148,25 @@ class StreamIngestor:
 
             backoff = self.backoff_min_seconds
             last_ok = time.time()
-            next_frame_time = time.monotonic()
+            next_store_time = time.monotonic()
 
             try:
                 while not self._stop_event.is_set():
                     now = time.monotonic()
-                    if now < next_frame_time:
-                        time.sleep(min(0.05, next_frame_time - now))
+                    # Drain decoder buffer to reduce latency.
+                    if now < next_store_time:
+                        ok = cap.grab()
+                        if ok:
+                            last_ok = time.time()
+                        else:
+                            if time.time() - last_ok >= self.read_timeout_seconds:
+                                self.metrics.last_error_message = (
+                                    f"Read timeout ({self.read_timeout_seconds:.1f}s)"
+                                )
+                                self.metrics.restart_count += 1
+                                break
+                            time.sleep(0.01)
                         continue
-                    next_frame_time = now + target_interval
 
                     ok, frame = cap.read()
 
@@ -171,6 +181,7 @@ class StreamIngestor:
                         continue
 
                     last_ok = time.time()
+                    next_store_time = now + target_interval
 
                     if (
                         frame.shape[1] != self.frame_width
