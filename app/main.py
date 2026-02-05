@@ -12,6 +12,9 @@ from app.overlay_store import OverlayStore
 from app.perception_manager import PerceptionManager
 from app.stream_manager import StreamManager
 from app.yolo_detector import YoloDetector
+from app.attention_manager import AttentionManager
+from app.schedule_manager import ScheduleManager
+from app.teacher_zones import TeacherZoneConfig
 
 
 def _build_yolo_detector(model_path: str) -> YoloDetector | None:
@@ -121,9 +124,23 @@ def create_app() -> FastAPI:
         object_risky=settings.object_risky,
         object_label_map=settings.object_label_map,
     )
+    zone_config = TeacherZoneConfig(settings.teacher_zone_path)
+    attention_manager = None
+    if settings.attention_enable:
+        attention_manager = AttentionManager(
+            interval_seconds=settings.attention_interval_seconds,
+            downscale_width=settings.attention_downscale_width,
+            downscale_height=settings.attention_downscale_height,
+            max_faces=settings.attention_max_faces,
+            zone_config=zone_config,
+            emit_callback=perception_1.emit_external_event,
+        )
+        perception_1.attention_manager = attention_manager
     perception_1.bootstrap_from_stream_manager()
+    schedule = ScheduleManager(settings.schedule_path, settings.schedule_timezone)
     inference = InferenceManager(
         perception=perception_1,
+        schedule=schedule,
         exam_mode=settings.perception_exam_mode,
         cheating_window_seconds=settings.inference_cheating_window_seconds,
         cheating_emit_interval_seconds=settings.inference_cheating_emit_interval_seconds,
@@ -144,6 +161,8 @@ def create_app() -> FastAPI:
         perception_1.start()
         inference.start()
         overlay_store.start()
+        if attention_manager is not None:
+            attention_manager.start()
 
     @app.on_event("shutdown")
     def _shutdown() -> None:
@@ -151,6 +170,8 @@ def create_app() -> FastAPI:
         perception_1.stop()
         inference.stop()
         overlay_store.stop()
+        if attention_manager is not None:
+            attention_manager.stop()
 
     app.include_router(
         build_router(

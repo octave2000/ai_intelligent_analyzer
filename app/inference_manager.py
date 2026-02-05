@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from typing import Deque, Dict, List, Optional, Tuple
 
 from app.perception_manager import PerceptionManager
+from app.schedule_manager import ScheduleManager
 
 logger = logging.getLogger(__name__)
 
@@ -20,6 +21,8 @@ class PersonSignalWindow:
     last_interaction_output: float = 0.0
     last_absence_output: float = 0.0
     last_paper_output: float = 0.0
+    last_attention_output: float = 0.0
+    last_offtask_output: float = 0.0
 
 
 @dataclass
@@ -32,6 +35,7 @@ class InferenceManager:
     def __init__(
         self,
         perception: PerceptionManager,
+        schedule: ScheduleManager,
         exam_mode: bool,
         cheating_window_seconds: float,
         cheating_emit_interval_seconds: float,
@@ -46,6 +50,7 @@ class InferenceManager:
         fight_proximity_threshold: int,
     ) -> None:
         self.perception = perception
+        self.schedule = schedule
         self.exam_mode = exam_mode
         self.cheating_window_seconds = cheating_window_seconds
         self.cheating_emit_interval_seconds = cheating_emit_interval_seconds
@@ -71,6 +76,7 @@ class InferenceManager:
         self._teacher_absence_threshold_seconds = 30.0
         self._person_ids: Dict[int, str] = {}
         self._person_roles: Dict[str, str] = {}
+        self._person_rooms: Dict[int, Tuple[str, str]] = {}
 
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
@@ -125,6 +131,11 @@ class InferenceManager:
         self._update_person_identity(event, global_id)
         if global_id is not None and event_type in ("person_detected", "person_tracked"):
             self._last_seen[global_id] = _get_float(event, "timestamp") or time.time()
+        if global_id is not None:
+            room_id = event.get("room_id")
+            camera_id = event.get("camera_id")
+            if isinstance(room_id, str) and isinstance(camera_id, str):
+                self._person_rooms[global_id] = (room_id, camera_id)
         if event_type == "role_assigned" and global_id is not None:
             role = event.get("role")
             if isinstance(role, str):
@@ -174,6 +185,8 @@ class InferenceManager:
                 self._maybe_emit_teacher_absence(global_id, window, now)
             if role == "student":
                 self._maybe_emit_participation(global_id, window, now)
+                self._maybe_emit_attention(global_id, window, now)
+                self._maybe_emit_offtask(global_id, window, now)
             self._maybe_emit_fight(global_id, window, now)
 
         for group_id, window in list(self._group_windows.items()):
@@ -305,6 +318,7 @@ class InferenceManager:
             "student_global_id": global_id,
             "participation_level": level,
             "confidence": min(1.0, 0.3 + score),
+            "teacher_present": self._teacher_present(global_id, now),
         }
         window.last_participation_output = now
         self._outputs.append(output)
@@ -426,6 +440,97 @@ class InferenceManager:
             global_id,
             output.get("confidence"),
         )
+
+    def _maybe_emit_attention(self, global_id: int, window: PersonSignalWindow, now: float) -> None:
+        recent = _filter_recent(window.events, now - self.participation_window_seconds)
+        focus_counts = {"teacher": 0, "notebook": 0, "unknown": 0}
+        for e in recent:
+            if e.get("event_type") != "attention_observation":
+                continue
+            mode = e.get("focus_mode", "unknown")
+            if mode not in focus_counts:
+                mode = "unknown"
+            focus_counts[mode] += 1
+
+        total = sum(focus_counts.values())
+        if total == 0:
+            return
+        teacher_ratio = focus_counts["teacher"] / float(total)
+        notebook_ratio = focus_counts["notebook"] / float(total)
+
+        device_penalty = _count_object_association(recent, {"phone", "laptop", "tablet"}) * 0.1
+        score = min(1.0, teacher_ratio * 0.6 + notebook_ratio * 0.4 - device_penalty)
+        if score < 0.35:
+            level = "low"
+        elif score < 0.65:
+            level = "medium"
+        else:
+            level = "high"
+
+        if teacher_ratio >= notebook_ratio:
+            focus = "teacher"
+        elif notebook_ratio >= 0.2:
+            focus = "notebook"
+        else:
+            focus = "unknown"
+
+        output = {
+            "timestamp": now,
+            "type": "attention_summary",
+            "student_person_id": self._person_id_for_global(global_id),
+            "student_global_id": global_id,
+            "attention_level": level,
+            "attention_score": max(0.0, score),
+            "focus_mode": focus,
+            "teacher_present": self._teacher_present(global_id, now),
+            "signals": {
+                "teacher_ratio": teacher_ratio,
+                "notebook_ratio": notebook_ratio,
+                "device_penalty": device_penalty,
+            },
+        }
+        window.last_attention_output = now
+        self._outputs.append(output)
+        logger.info(
+            "inference.output type=%s student_global_id=%s level=%s",
+            output.get("type"),
+            global_id,
+            level,
+        )
+
+    def _maybe_emit_offtask(self, global_id: int, window: PersonSignalWindow, now: float) -> None:
+        if self._teacher_present(global_id, now):
+            return
+        recent = _filter_recent(window.events, now - self.participation_window_seconds)
+        movement = _movement_distance(recent)
+        device_assoc = _count_object_association(recent, {"phone", "laptop", "tablet"})
+        if movement < 200.0 and device_assoc == 0:
+            return
+        output = {
+            "timestamp": now,
+            "type": "offtask_movement",
+            "student_person_id": self._person_id_for_global(global_id),
+            "student_global_id": global_id,
+            "movement_score": movement,
+            "device_events": device_assoc,
+            "confidence": min(1.0, 0.4 + min(0.6, movement / 400.0) + device_assoc * 0.1),
+            "teacher_present": False,
+        }
+        window.last_offtask_output = now
+        self._outputs.append(output)
+        logger.info(
+            "inference.output type=%s student_global_id=%s movement=%.1f",
+            output.get("type"),
+            global_id,
+            movement,
+        )
+
+    def _teacher_present(self, global_id: int, now: float) -> bool:
+        room = self._person_rooms.get(global_id)
+        if room is None:
+            return False
+        room_id, _camera_id = room
+        return self.schedule.is_teacher_present(room_id, now)
 
     def _maybe_emit_group_participation(self, group_id: int, window: GroupSignalWindow, now: float) -> None:
         recent = _filter_recent(window.events, now - self.participation_window_seconds)

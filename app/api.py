@@ -72,7 +72,7 @@ def build_router(
         )
         if not added:
             raise HTTPException(status_code=404, detail="Room not found or camera exists")
-        perception.add_camera(room_id, payload.camera_id)
+        perception.add_camera(room_id, payload.camera_id, payload.role)
         return {"room_id": room_id, "camera_id": payload.camera_id, "added": True}
 
     @router.delete("/rooms/{room_id}/cameras/{camera_id}")

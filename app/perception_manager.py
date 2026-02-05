@@ -14,6 +14,7 @@ from app.attendance_manager import AttendanceManager
 from app.yolo_detector import YoloDetector, YoloDetection
 from app.overlay_store import OverlayStore
 from app.stream_manager import StreamManager
+from app.attention_manager import TrackSummary
 
 logger = logging.getLogger(__name__)
 
@@ -71,6 +72,7 @@ class GlobalPerson:
 class CameraPerceptionState:
     room_id: str
     camera_id: str
+    role: str = "other"
     tracks: Dict[int, TrackState] = field(default_factory=dict)
     object_tracks: Dict[int, ObjectTrack] = field(default_factory=dict)
     next_track_id: int = 1
@@ -178,6 +180,7 @@ class PerceptionManager:
         object_priority: Tuple[str, ...] = (),
         object_risky: Tuple[str, ...] = (),
         object_label_map: Optional[Dict[str, Dict[str, str]]] = None,
+        attention_manager: Optional[object] = None,
     ) -> None:
         self.stream_manager = stream_manager
         self.active_interval_seconds = active_interval_seconds
@@ -213,12 +216,14 @@ class PerceptionManager:
         self.object_priority = set(object_priority)
         self.object_risky = set(object_risky)
         self.object_label_map = object_label_map or {}
+        self.attention_manager = attention_manager
 
         self._cameras: Dict[str, Dict[str, CameraPerceptionState]] = {}
         self._lock = threading.Lock()
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._events: Deque[Dict[str, object]] = deque(maxlen=2000)
+        self._events_lock = threading.Lock()
         self._resolver = GlobalIdentityResolver(
             similarity_threshold=global_similarity_threshold,
             max_age_seconds=global_max_age_seconds,
@@ -249,15 +254,19 @@ class PerceptionManager:
     def bootstrap_from_stream_manager(self) -> None:
         entries = self.stream_manager.list_camera_entries()
         for room_id, cameras in entries.items():
-            for camera_id in cameras.keys():
-                self.add_camera(room_id, camera_id)
+            for camera_id, entry in cameras.items():
+                self.add_camera(room_id, camera_id, entry.role)
 
-    def add_camera(self, room_id: str, camera_id: str) -> None:
+    def add_camera(self, room_id: str, camera_id: str, role: str = "other") -> None:
         with self._lock:
             room = self._cameras.setdefault(room_id, {})
             if camera_id in room:
                 return
-            room[camera_id] = CameraPerceptionState(room_id=room_id, camera_id=camera_id)
+            room[camera_id] = CameraPerceptionState(
+                room_id=room_id,
+                camera_id=camera_id,
+                role=role,
+            )
             self._refresh_camera_order_locked()
 
     def remove_camera(self, room_id: str, camera_id: str) -> None:
@@ -284,7 +293,9 @@ class PerceptionManager:
     ) -> List[Dict[str, object]]:
         limit = max(1, min(1000, limit))
         results: List[Dict[str, object]] = []
-        for event in reversed(self._events):
+        with self._events_lock:
+            events = list(self._events)
+        for event in reversed(events):
             if since is not None and _get_float(event, "timestamp") <= since:
                 continue
             if room_id is not None:
@@ -304,6 +315,7 @@ class PerceptionManager:
     def health(self) -> Dict[str, object]:
         with self._lock:
             room_items = list(self._cameras.items())
+        with self._events_lock:
             event_count = len(self._events)
         rooms: Dict[str, object] = {}
         total_cameras = 0
@@ -344,13 +356,29 @@ class PerceptionManager:
         frame: Optional["cv2.typing.MatLike"] = None,
     ) -> None:
         event["pipeline"] = self.pipeline_tag
-        self._events.append(event)
+        with self._events_lock:
+            self._events.append(event)
         logger.info(
             "perception.event room_id=%s camera_id=%s event_type=%s",
             event.get("room_id"),
             event.get("camera_id"),
             event.get("event_type"),
         )
+        if self.overlay_store is not None:
+            room_id = event.get("room_id")
+            camera_id = event.get("camera_id")
+            if isinstance(room_id, str) and isinstance(camera_id, str):
+                self.overlay_store.add_event(room_id, camera_id, event, frame=frame)
+
+    def emit_external_event(
+        self,
+        event: Dict[str, object],
+        frame: Optional["cv2.typing.MatLike"] = None,
+    ) -> None:
+        if "pipeline" not in event:
+            event["pipeline"] = self.pipeline_tag
+        with self._events_lock:
+            self._events.append(event)
         if self.overlay_store is not None:
             room_id = event.get("room_id")
             camera_id = event.get("camera_id")
@@ -563,6 +591,24 @@ class PerceptionManager:
                             frame,
                             timestamp=ts,
                         )
+                if self.attention_manager is not None:
+                    track_summaries = [
+                        TrackSummary(
+                            bbox=track.bbox,
+                            global_id=track.global_id,
+                            person_id=self._person_id_for_track(track),
+                            role=track.role,
+                        )
+                        for track in state.tracks.values()
+                    ]
+                    self.attention_manager.submit(
+                        state.room_id,
+                        state.camera_id,
+                        state.role,
+                        frame,
+                        ts,
+                        track_summaries,
+                    )
             success = True
         except Exception as exc:
             error = f"exception:{exc}"

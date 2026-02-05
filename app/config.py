@@ -264,6 +264,14 @@ class Settings:
     inference_fight_emit_interval_seconds: float
     inference_fight_motion_threshold: float
     inference_fight_proximity_threshold: int
+    schedule_path: str
+    schedule_timezone: str
+    teacher_zone_path: str
+    attention_enable: bool
+    attention_interval_seconds: float
+    attention_downscale_width: int
+    attention_downscale_height: int
+    attention_max_faces: int
 
     def __init__(self) -> None:
         self.frame_width = _get_int("FRAME_WIDTH", 640)
@@ -473,6 +481,14 @@ class Settings:
         self.inference_fight_proximity_threshold = _get_int(
             "INFERENCE_FIGHT_PROXIMITY_THRESHOLD", 2
         )
+        self.schedule_path = os.getenv("SCHEDULE_PATH", "data/schedule.json")
+        self.schedule_timezone = os.getenv("SCHEDULE_TZ", "Africa/Kigali")
+        self.teacher_zone_path = os.getenv("TEACHER_ZONE_PATH", "data/teacher_zones.json")
+        self.attention_enable = _get_bool("ATTENTION_ENABLE", True)
+        self.attention_interval_seconds = _get_float("ATTENTION_INTERVAL_SECONDS", 1.5)
+        self.attention_downscale_width = _get_int("ATTENTION_DOWNSCALE_WIDTH", 640)
+        self.attention_downscale_height = _get_int("ATTENTION_DOWNSCALE_HEIGHT", 360)
+        self.attention_max_faces = _get_int("ATTENTION_MAX_FACES", 20)
 
 
 settings = Settings()

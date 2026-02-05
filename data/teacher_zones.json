@@ -1,0 +1,8 @@
+{
+  "default": "top",
+  "by_role": {
+    "front": "top",
+    "back": "top"
+  },
+  "by_camera": {}
+}
