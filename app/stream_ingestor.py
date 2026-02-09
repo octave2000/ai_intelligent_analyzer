@@ -1,4 +1,5 @@
 import logging
+import math
 import os
 import threading
 import time
@@ -10,8 +11,22 @@ import cv2
 # ------------------------------------------------------------------
 # Force FFmpeg RTSP transport correctly (NOT via URL query params)
 # ------------------------------------------------------------------
-# Use 'tcp' for stability, 'udp' if your network is extremely clean
-os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp"
+# Use 'tcp' for stability, 'udp' if your network is extremely clean.
+# Respect user-provided OpenCV FFmpeg options if already set.
+_rtsp_transport = os.getenv("RTSP_TRANSPORT", "tcp").strip().lower()
+if _rtsp_transport not in {"tcp", "udp", "http", "https"}:
+    _rtsp_transport = "tcp"
+_default_ffmpeg_capture_options = (
+    f"rtsp_transport;{_rtsp_transport}"
+    "|fflags;nobuffer"
+    "|flags;low_delay"
+    "|max_delay;0"
+    "|reorder_queue_size;0"
+)
+os.environ.setdefault(
+    "OPENCV_FFMPEG_CAPTURE_OPTIONS",
+    _default_ffmpeg_capture_options,
+)
 
 # Optional but recommended for low-latency live streams
 os.environ["OPENCV_FFMPEG_LOGLEVEL"] = "error"
@@ -62,6 +77,11 @@ class StreamIngestor:
         self._lock = threading.Lock()
         self._last_frame: Optional["cv2.typing.MatLike"] = None
         self._last_timestamp: Optional[float] = None
+        self._last_arrival_timestamp: Optional[float] = None
+        self._last_source_timestamp: Optional[float] = None
+        self._source_epoch_wall: Optional[float] = None
+        self._source_epoch_stream: Optional[float] = None
+        self._max_backlog_seconds = 180.0
 
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
@@ -96,7 +116,21 @@ class StreamIngestor:
         with self._lock:
             if self._last_frame is None:
                 return None, None
-            return self._last_frame.copy(), self._last_timestamp
+            ts = self._last_source_timestamp
+            if ts is None:
+                ts = self._last_arrival_timestamp
+            return self._last_frame.copy(), ts
+
+    def snapshot_meta(
+        self,
+    ) -> Tuple[Optional["cv2.typing.MatLike"], Optional[float], Optional[float]]:
+        with self._lock:
+            if self._last_frame is None:
+                return None, None, None
+            source_ts = self._last_source_timestamp
+            if source_ts is None:
+                source_ts = self._last_arrival_timestamp
+            return self._last_frame.copy(), source_ts, self._last_arrival_timestamp
 
     # --------------------------------------------------------------
     # Internal helpers
@@ -149,6 +183,8 @@ class StreamIngestor:
             backoff = self.backoff_min_seconds
             last_ok = time.time()
             next_store_time = time.monotonic()
+            self._source_epoch_wall = None
+            self._source_epoch_stream = None
 
             try:
                 while not self._stop_event.is_set():
@@ -180,7 +216,9 @@ class StreamIngestor:
                         time.sleep(0.05)
                         continue
 
-                    last_ok = time.time()
+                    arrival_ts = time.time()
+                    source_ts = self._estimate_source_timestamp(cap, arrival_ts)
+                    last_ok = arrival_ts
                     next_store_time = now + target_interval
 
                     if (
@@ -195,14 +233,17 @@ class StreamIngestor:
 
                     with self._lock:
                         self._last_frame = frame
-                        self._last_timestamp = last_ok
+                        self._last_arrival_timestamp = arrival_ts
+                        self._last_source_timestamp = source_ts
+                        self._last_timestamp = source_ts
 
                     self.metrics.frames_received_total += 1
                     self.metrics.last_error_message = None
                     logger.debug(
-                        "stream_ingestor.frame stream_id=%s ts=%.3f",
+                        "stream_ingestor.frame stream_id=%s ts=%.3f arrival=%.3f",
                         self.stream_id,
-                        last_ok,
+                        source_ts,
+                        arrival_ts,
                     )
 
             except Exception as exc:
@@ -219,3 +260,47 @@ class StreamIngestor:
             backoff = min(self.backoff_max_seconds, backoff * 2)
 
         self.metrics.is_running = False
+
+    def _estimate_source_timestamp(
+        self,
+        cap: cv2.VideoCapture,
+        arrival_ts: float,
+    ) -> float:
+        stream_seconds = self._read_stream_position_seconds(cap)
+        if stream_seconds is None:
+            return arrival_ts
+
+        # Some backends expose absolute epoch seconds instead of relative stream position.
+        if stream_seconds > 1e8:
+            source_ts = stream_seconds
+        else:
+            if (
+                self._source_epoch_wall is None
+                or self._source_epoch_stream is None
+                or stream_seconds + 1.0 < self._source_epoch_stream
+            ):
+                self._source_epoch_wall = arrival_ts - stream_seconds
+            self._source_epoch_stream = stream_seconds
+            source_ts = (self._source_epoch_wall or arrival_ts) + stream_seconds
+
+        if not math.isfinite(source_ts):
+            return arrival_ts
+        if source_ts > arrival_ts + 2.0:
+            return arrival_ts
+        if arrival_ts - source_ts > self._max_backlog_seconds:
+            return arrival_ts - self._max_backlog_seconds
+        return source_ts
+
+    @staticmethod
+    def _read_stream_position_seconds(cap: cv2.VideoCapture) -> Optional[float]:
+        pos_msec = cap.get(cv2.CAP_PROP_POS_MSEC)
+        if math.isfinite(pos_msec) and pos_msec > 0.0:
+            return pos_msec / 1000.0
+        pts_prop = getattr(cv2, "CAP_PROP_PTS", None)
+        if pts_prop is None:
+            return None
+        pts = cap.get(pts_prop)
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        if math.isfinite(pts) and pts > 0.0 and math.isfinite(fps) and fps > 0.0:
+            return pts / fps
+        return None

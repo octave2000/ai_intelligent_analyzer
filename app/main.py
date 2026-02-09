@@ -113,6 +113,7 @@ def create_app() -> FastAPI:
         exam_mode=settings.perception_exam_mode,
         max_cameras_per_tick=settings.perception_max_cameras_per_tick,
         event_max_frame_age_seconds=settings.event_max_frame_age_seconds,
+        event_timestamp_offset_seconds=settings.event_timestamp_offset_seconds,
         dual_detect_test=False,
         pipeline_tag="p1",
         face_identifier=face_identifier,

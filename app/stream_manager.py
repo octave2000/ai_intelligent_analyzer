@@ -470,6 +470,47 @@ class StreamManager:
             )
         return frame, ts
 
+    def get_snapshot_meta(
+        self,
+        room_id: str,
+        camera_id: str,
+    ) -> Tuple[Optional["cv2.typing.MatLike"], Optional[float], Optional[float]]:
+        with self._lock:
+            cameras = self._rooms.get(room_id)
+            if cameras is None:
+                logger.debug(
+                    "stream_manager.snapshot_meta_miss room_id=%s camera_id=%s reason=room_missing",
+                    room_id,
+                    camera_id,
+                )
+                return None, None, None
+
+            entry = cameras.get(camera_id)
+            if entry is None:
+                logger.debug(
+                    "stream_manager.snapshot_meta_miss room_id=%s camera_id=%s reason=camera_missing",
+                    room_id,
+                    camera_id,
+                )
+                return None, None, None
+
+        frame, source_ts, arrival_ts = entry.ingestor.snapshot_meta()
+        if frame is None:
+            logger.debug(
+                "stream_manager.snapshot_meta_empty room_id=%s camera_id=%s",
+                room_id,
+                camera_id,
+            )
+        else:
+            logger.debug(
+                "stream_manager.snapshot_meta_ok room_id=%s camera_id=%s source_ts=%s arrival_ts=%s",
+                room_id,
+                camera_id,
+                f"{source_ts:.3f}" if isinstance(source_ts, float) else "none",
+                f"{arrival_ts:.3f}" if isinstance(arrival_ts, float) else "none",
+            )
+        return frame, source_ts, arrival_ts
+
     # --------------------------------------------------------------
     # Health checks
     # --------------------------------------------------------------
@@ -510,8 +551,8 @@ class StreamManager:
         overall = "healthy"
 
         for camera_id, entry in camera_items:
-            _, ts = entry.ingestor.snapshot()
-            status = self._camera_status(entry.ingestor.metrics, ts)
+            _, _source_ts, arrival_ts = entry.ingestor.snapshot_meta()
+            status = self._camera_status(entry.ingestor.metrics, arrival_ts)
             statuses[camera_id] = status
 
             if status["health"] == "down":

@@ -21,8 +21,15 @@ class OverlayBuffer:
 @dataclass
 class SnapshotBuffer:
     frame: "cv2.typing.MatLike"
-    annotations: list
     last_update: float
+    event_timestamp: Optional[float] = None
+    frame_source_timestamp: Optional[float] = None
+    timestamp_offset_seconds: Optional[float] = None
+    emitted_at: Optional[float] = None
+    frame_age_seconds: Optional[float] = None
+    frame_transport_delay_seconds: Optional[float] = None
+    event_type: Optional[str] = None
+    event_count: int = 0
 
 
 class OverlayStore:
@@ -189,20 +196,21 @@ class OverlayStore:
     ) -> None:
         ts_raw = _get_float(event, "timestamp")
         ts = int(ts_raw)
+        event_timestamp = _get_optional_float(event, "timestamp")
+        frame_source_timestamp = _get_optional_float(event, "frame_source_timestamp")
+        timestamp_offset_seconds = _get_optional_float(event, "timestamp_offset_seconds")
+        emitted_at = _get_optional_float(event, "emitted_at")
+        frame_age_seconds = _get_optional_float(event, "frame_age_seconds")
+        frame_transport_delay_seconds = _get_optional_float(
+            event, "frame_transport_delay_seconds"
+        )
+        event_type = event.get("event_type")
+        if not isinstance(event_type, str):
+            event_type = None
         try:
             image = frame.copy()
         except Exception:
             return
-        label = event.get("event_type", "event")
-        gid = event.get("global_person_id")
-        if gid is not None:
-            label = f"{label}:gid={gid}"
-        label = f"{label}@{ts_raw:.2f}"
-        annotation = {
-            "bbox": event.get("bbox"),
-            "label": label,
-            "confidence": event.get("confidence"),
-        }
         with self._lock:
             room = self._snapshot_buffers.setdefault(room_id, {})
             camera = room.setdefault(camera_id, {})
@@ -210,12 +218,34 @@ class OverlayStore:
             if buf is None:
                 camera[ts] = SnapshotBuffer(
                     frame=image,
-                    annotations=[annotation],
                     last_update=time.time(),
+                    event_timestamp=event_timestamp,
+                    frame_source_timestamp=frame_source_timestamp,
+                    timestamp_offset_seconds=timestamp_offset_seconds,
+                    emitted_at=emitted_at,
+                    frame_age_seconds=frame_age_seconds,
+                    frame_transport_delay_seconds=frame_transport_delay_seconds,
+                    event_type=event_type,
+                    event_count=1,
                 )
             else:
-                buf.annotations.append(annotation)
+                buf.frame = image
                 buf.last_update = time.time()
+                buf.event_count += 1
+                if event_timestamp is not None:
+                    buf.event_timestamp = event_timestamp
+                if frame_source_timestamp is not None:
+                    buf.frame_source_timestamp = frame_source_timestamp
+                if timestamp_offset_seconds is not None:
+                    buf.timestamp_offset_seconds = timestamp_offset_seconds
+                if emitted_at is not None:
+                    buf.emitted_at = emitted_at
+                if frame_age_seconds is not None:
+                    buf.frame_age_seconds = frame_age_seconds
+                if frame_transport_delay_seconds is not None:
+                    buf.frame_transport_delay_seconds = frame_transport_delay_seconds
+                if event_type is not None:
+                    buf.event_type = event_type
 
     def _flush_snapshots_due(self) -> None:
         if not self.snapshot_enabled:
@@ -258,34 +288,6 @@ class OverlayStore:
             image = buf.frame.copy()
         except Exception:
             return
-        try:
-            cv2.putText(
-                image,
-                time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(ts)),
-                (10, 20),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.6,
-                (0, 220, 255),
-                2,
-            )
-        except Exception:
-            pass
-        for ann in buf.annotations:
-            bbox = ann.get("bbox")
-            if isinstance(bbox, (list, tuple)) and len(bbox) == 4:
-                x1, y1, x2, y2 = (int(v) for v in bbox)
-                cv2.rectangle(image, (x1, y1), (x2, y2), (0, 220, 255), 2)
-                label = ann.get("label")
-                if label:
-                    cv2.putText(
-                        image,
-                        str(label),
-                        (x1, max(12, y1 - 6)),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        0.5,
-                        (0, 220, 255),
-                        1,
-                    )
         dir_path = os.path.join(self.snapshot_path, room_id, camera_id)
         os.makedirs(dir_path, exist_ok=True)
         filename = f"{ts}.jpg"
@@ -294,52 +296,82 @@ class OverlayStore:
             cv2.imwrite(path, image)
         except Exception:
             return
+        write_ts = time.time()
+        event_timestamp = buf.event_timestamp if buf.event_timestamp is not None else float(ts)
+        emitted_at = buf.emitted_at
+        sidecar = {
+            "snapshot_type": "event_snapshot",
+            "room_id": room_id,
+            "camera_id": camera_id,
+            "image_file": filename,
+            "event_timestamp": event_timestamp,
+            "frame_source_timestamp": buf.frame_source_timestamp,
+            "timestamp_offset_seconds": buf.timestamp_offset_seconds,
+            "emitted_at": emitted_at,
+            "write_time": write_ts,
+            "frame_age_seconds": buf.frame_age_seconds,
+            "frame_transport_delay_seconds": buf.frame_transport_delay_seconds,
+            "event_type": buf.event_type,
+            "event_count": buf.event_count,
+        }
+        if emitted_at is not None:
+            sidecar["event_pipeline_lag_seconds"] = max(0.0, emitted_at - event_timestamp)
+        sidecar["snapshot_lag_seconds"] = max(0.0, write_ts - event_timestamp)
+        sidecar_path = os.path.join(dir_path, f"{ts}.json")
+        self._write_sidecar(sidecar_path, sidecar)
 
     def add_snapshot_all(
         self,
         room_id: str,
         camera_id: str,
-        annotations: list,
         frame: "cv2.typing.MatLike",
         timestamp: Optional[float] = None,
     ) -> None:
         if not self.snapshot_all:
             return
-        now = time.time() if timestamp is None else timestamp
+        event_ts = time.time() if timestamp is None else timestamp
         with self._lock:
             room = self._last_snapshot_all.setdefault(room_id, {})
             last_ts = room.get(camera_id, 0.0)
-            if now - last_ts < self.snapshot_min_interval_seconds:
+            if event_ts - last_ts < self.snapshot_min_interval_seconds:
                 return
-            room[camera_id] = now
+            room[camera_id] = event_ts
         try:
             image = frame.copy()
         except Exception:
             return
-        for ann in annotations:
-            bbox = ann.get("bbox")
-            if isinstance(bbox, (list, tuple)) and len(bbox) == 4:
-                x1, y1, x2, y2 = (int(v) for v in bbox)
-                cv2.rectangle(image, (x1, y1), (x2, y2), (0, 255, 0), 2)
-                label = ann.get("label")
-                if label:
-                    cv2.putText(
-                        image,
-                        str(label),
-                        (x1, max(12, y1 - 6)),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        0.5,
-                        (0, 255, 0),
-                        1,
-                    )
         dir_path = os.path.join(self.snapshot_path, room_id, camera_id, "all")
         os.makedirs(dir_path, exist_ok=True)
-        filename = f"{int(now * 1000)}.jpg"
+        filename = f"{int(event_ts * 1000)}.jpg"
         path = os.path.join(dir_path, filename)
         try:
             cv2.imwrite(path, image)
         except Exception:
             return
+        write_ts = time.time()
+        sidecar = {
+            "snapshot_type": "all_snapshot",
+            "room_id": room_id,
+            "camera_id": camera_id,
+            "image_file": filename,
+            "event_timestamp": event_ts,
+            "emitted_at": write_ts,
+            "write_time": write_ts,
+            "snapshot_lag_seconds": max(0.0, write_ts - event_ts),
+        }
+        sidecar_path = os.path.join(
+            dir_path, f"{int(event_ts * 1000)}.json"
+        )
+        self._write_sidecar(sidecar_path, sidecar)
+
+    def _write_sidecar(self, path: str, payload: Dict[str, object]) -> None:
+        tmp_path = f"{path}.tmp"
+        try:
+            with open(tmp_path, "w", encoding="utf-8") as handle:
+                json.dump(payload, handle, separators=(",", ":"))
+            os.replace(tmp_path, path)
+        except Exception as exc:
+            logger.warning("overlay_store.snapshot_sidecar_failed path=%s error=%s", path, exc)
 
     def _append_index(self, dir_path: str, ts: int, events: list) -> None:
         date_key = time.strftime("%Y-%m-%d", time.localtime(ts))
@@ -432,3 +464,17 @@ def _get_float(event: Dict[str, object], key: str) -> float:
         except ValueError:
             return 0.0
     return 0.0
+
+
+def _get_optional_float(event: Dict[str, object], key: str) -> Optional[float]:
+    value = event.get(key)
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            return float(value)
+        except ValueError:
+            return None
+    return None

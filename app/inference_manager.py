@@ -94,7 +94,7 @@ class InferenceManager:
         limit = max(1, min(1000, limit))
         results: List[Dict[str, object]] = []
         for output in reversed(self._outputs):
-            if since is not None and _get_float(output, "timestamp") <= since:
+            if since is not None and _output_cursor_ts(output) <= since:
                 continue
             results.append(output)
             if len(results) >= limit:
@@ -109,11 +109,21 @@ class InferenceManager:
             "group_windows": len(self._group_windows),
         }
 
+    def _append_output(self, output: Dict[str, object], emitted_at: float) -> None:
+        if "emitted_at" not in output:
+            output["emitted_at"] = emitted_at
+        ts = _get_float(output, "timestamp")
+        if ts <= 0.0:
+            output["timestamp"] = emitted_at
+            ts = emitted_at
+        output["lag_seconds"] = max(0.0, emitted_at - ts)
+        self._outputs.append(output)
+
     def _run(self) -> None:
         while not self._stop_event.is_set():
             events = self.perception.get_events(since=self._last_ts)
             if events:
-                latest = max(_get_float(e, "timestamp") for e in events)
+                latest = max(_event_cursor_ts(e) for e in events)
                 self._last_ts = max(self._last_ts, latest)
                 for event in events:
                     self._consume_event(event)
@@ -130,7 +140,7 @@ class InferenceManager:
         )
         self._update_person_identity(event, global_id)
         if global_id is not None and event_type in ("person_detected", "person_tracked"):
-            self._last_seen[global_id] = _get_float(event, "timestamp") or time.time()
+            self._last_seen[global_id] = _event_cursor_ts(event) or time.time()
         if global_id is not None:
             room_id = event.get("room_id")
             camera_id = event.get("camera_id")
@@ -194,6 +204,7 @@ class InferenceManager:
 
     def _maybe_emit_cheating(self, global_id: int, window: PersonSignalWindow, now: float) -> None:
         recent = _filter_recent(window.events, now - self.cheating_window_seconds)
+        event_ts = _latest_event_ts(recent, now)
         signals: List[str] = []
         score = 0.0
 
@@ -231,7 +242,7 @@ class InferenceManager:
 
         confidence = min(1.0, score + 0.1)
         output = {
-            "timestamp": now,
+            "timestamp": event_ts,
             "type": "cheating_suspicion",
             "student_person_id": self._person_id_for_global(global_id),
             "student_global_id": global_id,
@@ -241,7 +252,7 @@ class InferenceManager:
             "time_window": self.cheating_window_seconds,
         }
         window.last_cheating_output = now
-        self._outputs.append(output)
+        self._append_output(output, now)
         logger.info(
             "inference.output type=%s global_person_id=%s score=%.3f",
             output.get("type"),
@@ -251,6 +262,7 @@ class InferenceManager:
 
     def _maybe_emit_teacher(self, global_id: int, window: PersonSignalWindow, now: float) -> None:
         recent = _filter_recent(window.events, now - self.teacher_window_seconds)
+        event_ts = _latest_event_ts(recent, now)
 
         movement = _movement_distance(recent)
         group_interactions = _count_group_membership(
@@ -267,7 +279,7 @@ class InferenceManager:
         engagement = max(0.0, min(1.0, 0.5 * movement_score + 0.5 * interaction_score - device_penalty - down_penalty))
 
         output = {
-            "timestamp": now,
+            "timestamp": event_ts,
             "type": "teacher_engagement",
             "teacher_person_id": self._person_id_for_global(global_id),
             "teacher_global_id": global_id,
@@ -281,7 +293,7 @@ class InferenceManager:
             "confidence": min(1.0, 0.4 + 0.6 * (movement_score + interaction_score) / 2.0),
         }
         window.last_teacher_output = now
-        self._outputs.append(output)
+        self._append_output(output, now)
         logger.info(
             "inference.output type=%s teacher_global_id=%s score=%.3f",
             output.get("type"),
@@ -291,6 +303,7 @@ class InferenceManager:
 
     def _maybe_emit_participation(self, global_id: int, window: PersonSignalWindow, now: float) -> None:
         recent = _filter_recent(window.events, now - self.participation_window_seconds)
+        event_ts = _latest_event_ts(recent, now)
 
         group_interactions = _count_group_membership(
             recent, self._person_id_for_global(global_id)
@@ -312,16 +325,16 @@ class InferenceManager:
             level = "high"
 
         output = {
-            "timestamp": now,
+            "timestamp": event_ts,
             "type": "participation_summary",
             "student_person_id": self._person_id_for_global(global_id),
             "student_global_id": global_id,
             "participation_level": level,
             "confidence": min(1.0, 0.3 + score),
-            "teacher_present": self._teacher_present(global_id, now),
+            "teacher_present": self._teacher_present(global_id, event_ts),
         }
         window.last_participation_output = now
-        self._outputs.append(output)
+        self._append_output(output, now)
         logger.info(
             "inference.output type=%s student_global_id=%s level=%s",
             output.get("type"),
@@ -331,6 +344,7 @@ class InferenceManager:
 
     def _maybe_emit_teacher_interaction(self, global_id: int, window: PersonSignalWindow, now: float) -> None:
         recent = _filter_recent(window.events, now - self.teacher_window_seconds)
+        event_ts = _latest_event_ts(recent, now)
         student_ids = set()
         student_global_ids = set()
         best_duration = 0.0
@@ -349,7 +363,7 @@ class InferenceManager:
             best_duration = max(best_duration, _get_float(e, "duration_seconds"))
         confidence = min(1.0, 0.4 + min(0.6, best_duration / 10.0))
         output = {
-            "timestamp": now,
+            "timestamp": event_ts,
             "type": "teacher_student_interaction",
             "teacher_person_id": self._person_id_for_global(global_id),
             "student_person_ids": sorted(student_ids),
@@ -360,7 +374,7 @@ class InferenceManager:
             "time_window": self.teacher_window_seconds,
         }
         window.last_interaction_output = now
-        self._outputs.append(output)
+        self._append_output(output, now)
         logger.info(
             "inference.output type=%s teacher_global_id=%s students=%d",
             output.get("type"),
@@ -383,7 +397,7 @@ class InferenceManager:
             "time_window": self.teacher_window_seconds,
         }
         window.last_absence_output = now
-        self._outputs.append(output)
+        self._append_output(output, now)
         logger.info(
             "inference.output type=%s teacher_global_id=%s absence=%.1fs",
             output.get("type"),
@@ -393,9 +407,10 @@ class InferenceManager:
 
     def _maybe_emit_paper_interaction(self, global_id: int, window: PersonSignalWindow, now: float) -> None:
         recent = _filter_recent(window.events, now - self.cheating_window_seconds)
+        event_ts = _latest_event_ts(recent, now)
         related = _extract_related_person_ids(recent, self._person_id_for_global(global_id))
         output = {
-            "timestamp": now,
+            "timestamp": event_ts,
             "type": "paper_interaction",
             "student_person_id": self._person_id_for_global(global_id),
             "related_person_ids": related,
@@ -405,7 +420,7 @@ class InferenceManager:
             "time_window": self.cheating_window_seconds,
         }
         window.last_paper_output = now
-        self._outputs.append(output)
+        self._append_output(output, now)
         logger.info(
             "inference.output type=%s student_global_id=%s related=%d",
             output.get("type"),
@@ -415,13 +430,14 @@ class InferenceManager:
 
     def _maybe_emit_fight(self, global_id: int, window: PersonSignalWindow, now: float) -> None:
         recent = _filter_recent(window.events, now - self.fight_window_seconds)
+        event_ts = _latest_event_ts(recent, now)
         movement = _movement_distance(recent)
         proximity = _count_proximity_close(recent)
         involved = _extract_related_person_ids(recent, self._person_id_for_global(global_id))
         signals = ["rapid_motion", "close_proximity"]
         confidence = min(1.0, 0.4 + (movement / (self.fight_motion_threshold * 2.0)) * 0.3 + proximity * 0.1)
         output = {
-            "timestamp": now,
+            "timestamp": event_ts,
             "type": "safety_suspicion",
             "category": "fight",
             "person_id": self._person_id_for_global(global_id),
@@ -433,7 +449,7 @@ class InferenceManager:
             "time_window": self.fight_window_seconds,
         }
         window.last_fight_output = now
-        self._outputs.append(output)
+        self._append_output(output, now)
         logger.info(
             "inference.output type=%s global_person_id=%s confidence=%.3f",
             output.get("type"),
@@ -443,6 +459,7 @@ class InferenceManager:
 
     def _maybe_emit_attention(self, global_id: int, window: PersonSignalWindow, now: float) -> None:
         recent = _filter_recent(window.events, now - self.participation_window_seconds)
+        event_ts = _latest_event_ts(recent, now)
         focus_counts = {"teacher": 0, "notebook": 0, "unknown": 0}
         for e in recent:
             if e.get("event_type") != "attention_observation":
@@ -475,14 +492,14 @@ class InferenceManager:
             focus = "unknown"
 
         output = {
-            "timestamp": now,
+            "timestamp": event_ts,
             "type": "attention_summary",
             "student_person_id": self._person_id_for_global(global_id),
             "student_global_id": global_id,
             "attention_level": level,
             "attention_score": max(0.0, score),
             "focus_mode": focus,
-            "teacher_present": self._teacher_present(global_id, now),
+            "teacher_present": self._teacher_present(global_id, event_ts),
             "signals": {
                 "teacher_ratio": teacher_ratio,
                 "notebook_ratio": notebook_ratio,
@@ -490,7 +507,7 @@ class InferenceManager:
             },
         }
         window.last_attention_output = now
-        self._outputs.append(output)
+        self._append_output(output, now)
         logger.info(
             "inference.output type=%s student_global_id=%s level=%s",
             output.get("type"),
@@ -499,15 +516,16 @@ class InferenceManager:
         )
 
     def _maybe_emit_offtask(self, global_id: int, window: PersonSignalWindow, now: float) -> None:
-        if self._teacher_present(global_id, now):
-            return
         recent = _filter_recent(window.events, now - self.participation_window_seconds)
+        event_ts = _latest_event_ts(recent, now)
+        if self._teacher_present(global_id, event_ts):
+            return
         movement = _movement_distance(recent)
         device_assoc = _count_object_association(recent, {"phone", "laptop", "tablet"})
         if movement < 200.0 and device_assoc == 0:
             return
         output = {
-            "timestamp": now,
+            "timestamp": event_ts,
             "type": "offtask_movement",
             "student_person_id": self._person_id_for_global(global_id),
             "student_global_id": global_id,
@@ -517,7 +535,7 @@ class InferenceManager:
             "teacher_present": False,
         }
         window.last_offtask_output = now
-        self._outputs.append(output)
+        self._append_output(output, now)
         logger.info(
             "inference.output type=%s student_global_id=%s movement=%.1f",
             output.get("type"),
@@ -534,6 +552,7 @@ class InferenceManager:
 
     def _maybe_emit_group_participation(self, group_id: int, window: GroupSignalWindow, now: float) -> None:
         recent = _filter_recent(window.events, now - self.participation_window_seconds)
+        event_ts = _latest_event_ts(recent, now)
         duration = _group_duration(recent)
         motion_intensity = _group_motion_intensity(recent)
         members = _group_members(recent)
@@ -552,14 +571,14 @@ class InferenceManager:
             level = "high"
 
         output = {
-            "timestamp": now,
+            "timestamp": event_ts,
             "type": "participation_summary",
             "group_id": group_id,
             "participation_level": level,
             "confidence": min(1.0, 0.3 + min(1.0, duration / 30.0) + motion_intensity * 0.3),
         }
         window.last_output = now
-        self._outputs.append(output)
+        self._append_output(output, now)
         logger.info(
             "inference.output type=%s group_id=%s level=%s",
             output.get("type"),
@@ -568,7 +587,7 @@ class InferenceManager:
         )
 
         collab_output = {
-            "timestamp": now,
+            "timestamp": event_ts,
             "type": "group_collaboration",
             "group_id": group_id,
             "student_person_ids": sorted(student_members),
@@ -580,7 +599,7 @@ class InferenceManager:
             "duration_seconds": duration,
             "confidence": min(1.0, 0.4 + min(0.6, duration / 30.0) + motion_intensity * 0.2),
         }
-        self._outputs.append(collab_output)
+        self._append_output(collab_output, now)
         logger.info(
             "inference.output type=%s group_id=%s students=%d",
             collab_output.get("type"),
@@ -589,7 +608,7 @@ class InferenceManager:
         )
 
         student_output = {
-            "timestamp": now,
+            "timestamp": event_ts,
             "type": "student_group_interaction",
             "group_id": group_id,
             "student_person_ids": sorted(student_members),
@@ -601,7 +620,7 @@ class InferenceManager:
             "duration_seconds": duration,
             "confidence": min(1.0, 0.3 + min(0.6, duration / 30.0)),
         }
-        self._outputs.append(student_output)
+        self._append_output(student_output, now)
         logger.info(
             "inference.output type=%s group_id=%s students=%d",
             student_output.get("type"),
@@ -612,6 +631,37 @@ class InferenceManager:
 
 def _filter_recent(events: Deque[Dict[str, object]], since: float) -> List[Dict[str, object]]:
     return [e for e in events if _get_float(e, "timestamp") >= since]
+
+
+def _event_cursor_ts(event: Dict[str, object]) -> float:
+    emitted = _get_float(event, "emitted_at")
+    event_ts = _get_float(event, "timestamp")
+    if emitted > 0.0 and event_ts > 0.0:
+        return max(emitted, event_ts)
+    if emitted > 0.0:
+        return emitted
+    return event_ts
+
+
+def _output_cursor_ts(output: Dict[str, object]) -> float:
+    emitted = _get_float(output, "emitted_at")
+    output_ts = _get_float(output, "timestamp")
+    if emitted > 0.0 and output_ts > 0.0:
+        return max(emitted, output_ts)
+    if emitted > 0.0:
+        return emitted
+    return output_ts
+
+
+def _latest_event_ts(events: List[Dict[str, object]], fallback: float) -> float:
+    latest = 0.0
+    for event in events:
+        ts = _get_float(event, "timestamp")
+        if ts > latest:
+            latest = ts
+    if latest > 0.0:
+        return latest
+    return fallback
 
 
 def _count_object(events: List[Dict[str, object]], object_type: str) -> int:

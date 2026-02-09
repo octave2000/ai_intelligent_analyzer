@@ -209,6 +209,7 @@ class Settings:
     perception_exam_mode: bool
     perception_max_cameras_per_tick: int
     perception_dual_detect_test: bool
+    event_timestamp_offset_seconds: float
     roster_path: str
     attendance_path: str
     face_similarity_threshold: float
@@ -290,6 +291,10 @@ class Settings:
         self.event_max_frame_age_seconds = _get_float(
             "EVENT_MAX_FRAME_AGE_SECONDS",
             self.perception_stale_seconds,
+        )
+        self.event_timestamp_offset_seconds = _get_float(
+            "EVENT_TIMESTAMP_OFFSET_SECONDS",
+            0.0,
         )
         self.perception_track_ttl_seconds = _get_float("PERCEPTION_TRACK_TTL_SECONDS", 2.5)
         self.perception_object_ttl_seconds = _get_float("PERCEPTION_OBJECT_TTL_SECONDS", 3.0)

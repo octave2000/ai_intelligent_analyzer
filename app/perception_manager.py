@@ -78,8 +78,11 @@ class CameraPerceptionState:
     next_track_id: int = 1
     next_object_id: int = 1
     last_run: float = 0.0
+    last_frame_source_timestamp: Optional[float] = None
     last_frame_timestamp: Optional[float] = None
+    last_frame_timestamp_offset_seconds: float = 0.0
     last_frame_age_seconds: Optional[float] = None
+    last_frame_transport_delay_seconds: Optional[float] = None
     lock: threading.Lock = field(default_factory=threading.Lock)
     proximity_state: Dict[Tuple[int, int], Tuple[bool, float, bool]] = field(default_factory=dict)
     group_state: Dict[frozenset, Tuple[int, float, bool]] = field(default_factory=dict)
@@ -170,6 +173,7 @@ class PerceptionManager:
         exam_mode: bool,
         max_cameras_per_tick: int,
         event_max_frame_age_seconds: float,
+        event_timestamp_offset_seconds: float,
         dual_detect_test: bool,
         pipeline_tag: str = "p1",
         face_identifier: Optional[FaceIdentifier] = None,
@@ -206,6 +210,7 @@ class PerceptionManager:
         self.exam_mode = exam_mode
         self.max_cameras_per_tick = max(1, max_cameras_per_tick)
         self.event_max_frame_age_seconds = max(0.0, event_max_frame_age_seconds)
+        self.event_timestamp_offset_seconds = event_timestamp_offset_seconds
         self.dual_detect_test = dual_detect_test
         self.pipeline_tag = pipeline_tag
         self.face_identifier = face_identifier
@@ -296,7 +301,7 @@ class PerceptionManager:
         with self._events_lock:
             events = list(self._events)
         for event in reversed(events):
-            if since is not None and _get_float(event, "timestamp") <= since:
+            if since is not None and _event_cursor_ts(event) <= since:
                 continue
             if room_id is not None:
                 event_room = event.get("room_id")
@@ -355,6 +360,8 @@ class PerceptionManager:
         event: Dict[str, object],
         frame: Optional["cv2.typing.MatLike"] = None,
     ) -> None:
+        if "emitted_at" not in event:
+            event["emitted_at"] = time.time()
         event["pipeline"] = self.pipeline_tag
         with self._events_lock:
             self._events.append(event)
@@ -375,6 +382,8 @@ class PerceptionManager:
         event: Dict[str, object],
         frame: Optional["cv2.typing.MatLike"] = None,
     ) -> None:
+        if "emitted_at" not in event:
+            event["emitted_at"] = time.time()
         if "pipeline" not in event:
             event["pipeline"] = self.pipeline_tag
         with self._events_lock:
@@ -457,8 +466,10 @@ class PerceptionManager:
         with state.lock:
             state.last_attempt_at = start
         try:
-            frame, ts = self.stream_manager.get_snapshot(state.room_id, state.camera_id)
-            if frame is None or ts is None:
+            frame, ts, arrival_ts = self.stream_manager.get_snapshot_meta(
+                state.room_id, state.camera_id
+            )
+            if frame is None or ts is None or arrival_ts is None:
                 logger.info(
                     "perception.skip room_id=%s camera_id=%s reason=frame_missing",
                     state.room_id,
@@ -466,31 +477,42 @@ class PerceptionManager:
                 )
                 error = "frame_missing"
                 return
-            frame_age_seconds = time.time() - ts
-            if frame_age_seconds > self.stale_seconds:
+            now = time.time()
+            frame_arrival_age_seconds = now - arrival_ts
+            if frame_arrival_age_seconds > self.stale_seconds:
                 logger.info(
-                    "perception.skip room_id=%s camera_id=%s reason=frame_stale",
+                    "perception.skip room_id=%s camera_id=%s reason=frame_stale arrival_age=%.3f",
                     state.room_id,
                     state.camera_id,
+                    frame_arrival_age_seconds,
                 )
                 error = "frame_stale"
                 return
             if (
                 self.event_max_frame_age_seconds > 0.0
-                and frame_age_seconds > self.event_max_frame_age_seconds
+                and frame_arrival_age_seconds > self.event_max_frame_age_seconds
             ):
                 logger.info(
-                    "perception.skip room_id=%s camera_id=%s reason=frame_too_old age=%.3f max_age=%.3f",
+                    "perception.skip room_id=%s camera_id=%s reason=frame_too_old arrival_age=%.3f max_age=%.3f",
                     state.room_id,
                     state.camera_id,
-                    frame_age_seconds,
+                    frame_arrival_age_seconds,
                     self.event_max_frame_age_seconds,
                 )
                 error = "frame_too_old"
                 return
+            source_ts = ts
+            event_ts = source_ts + self.event_timestamp_offset_seconds
+            frame_age_seconds = now - event_ts
+            frame_transport_delay_seconds = max(0.0, arrival_ts - source_ts)
             with state.lock:
-                state.last_frame_timestamp = ts
+                state.last_frame_source_timestamp = source_ts
+                state.last_frame_timestamp = event_ts
+                state.last_frame_timestamp_offset_seconds = (
+                    self.event_timestamp_offset_seconds
+                )
                 state.last_frame_age_seconds = frame_age_seconds
+                state.last_frame_transport_delay_seconds = frame_transport_delay_seconds
 
             faces: List[FaceMatch] = []
             if self.face_identifier and self.face_identifier.ready():
@@ -565,32 +587,13 @@ class PerceptionManager:
                         },
                     )
                 )
-                if self.overlay_store is not None:
-                    annotations = []
-                    for det in detections:
-                        annotations.append(
-                            {
-                                "bbox": det.bbox,
-                                "label": f"person:{det.confidence:.2f}",
-                                "confidence": det.confidence,
-                            }
-                        )
-                    for obj in objects:
-                        annotations.append(
-                            {
-                                "bbox": obj.bbox,
-                                "label": f"{obj.object_type}:{obj.confidence:.2f}",
-                                "confidence": obj.confidence,
-                            }
-                        )
-                    if annotations:
-                        self.overlay_store.add_snapshot_all(
-                            state.room_id,
-                            state.camera_id,
-                            annotations,
-                            frame,
-                            timestamp=ts,
-                        )
+                if self.overlay_store is not None and (detections or objects):
+                    self.overlay_store.add_snapshot_all(
+                        state.room_id,
+                        state.camera_id,
+                        frame,
+                        timestamp=ts,
+                    )
                 if self.attention_manager is not None:
                     track_summaries = [
                         TrackSummary(
@@ -1386,8 +1389,14 @@ def _event(
     }
     if state.last_frame_timestamp is not None:
         data["frame_timestamp"] = state.last_frame_timestamp
+    if state.last_frame_source_timestamp is not None:
+        data["frame_source_timestamp"] = state.last_frame_source_timestamp
+    if state.last_frame_timestamp_offset_seconds != 0.0:
+        data["timestamp_offset_seconds"] = state.last_frame_timestamp_offset_seconds
     if state.last_frame_age_seconds is not None:
         data["frame_age_seconds"] = state.last_frame_age_seconds
+    if state.last_frame_transport_delay_seconds is not None:
+        data["frame_transport_delay_seconds"] = state.last_frame_transport_delay_seconds
     data.update(payload)
     return data
 
@@ -1573,6 +1582,16 @@ def _get_float(event: Dict[str, object], key: str) -> float:
         except ValueError:
             return 0.0
     return 0.0
+
+
+def _event_cursor_ts(event: Dict[str, object]) -> float:
+    emitted = _get_float(event, "emitted_at")
+    event_ts = _get_float(event, "timestamp")
+    if emitted > 0.0 and event_ts > 0.0:
+        return max(emitted, event_ts)
+    if emitted > 0.0:
+        return emitted
+    return event_ts
 
 
 
