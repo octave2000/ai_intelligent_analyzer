@@ -5,7 +5,7 @@ import threading
 import time
 from collections import deque
 from dataclasses import dataclass, field
-from typing import Deque, Dict, Optional
+from typing import Deque, Dict, List, Optional, Tuple
 
 import cv2
 
@@ -30,6 +30,7 @@ class SnapshotBuffer:
     frame_transport_delay_seconds: Optional[float] = None
     event_type: Optional[str] = None
     event_count: int = 0
+    events: List[Dict[str, object]] = field(default_factory=list)
 
 
 class OverlayStore:
@@ -227,11 +228,14 @@ class OverlayStore:
                     frame_transport_delay_seconds=frame_transport_delay_seconds,
                     event_type=event_type,
                     event_count=1,
+                    events=[event.copy()],
                 )
             else:
                 buf.frame = image
                 buf.last_update = time.time()
                 buf.event_count += 1
+                if len(buf.events) < 200:
+                    buf.events.append(event.copy())
                 if event_timestamp is not None:
                     buf.event_timestamp = event_timestamp
                 if frame_source_timestamp is not None:
@@ -288,6 +292,7 @@ class OverlayStore:
             image = buf.frame.copy()
         except Exception:
             return
+        self._draw_snapshot_events(image, buf.events)
         dir_path = os.path.join(self.snapshot_path, room_id, camera_id)
         os.makedirs(dir_path, exist_ok=True)
         filename = f"{ts}.jpg"
@@ -313,6 +318,7 @@ class OverlayStore:
             "frame_transport_delay_seconds": buf.frame_transport_delay_seconds,
             "event_type": buf.event_type,
             "event_count": buf.event_count,
+            "drawn_event_count": len(buf.events),
         }
         if emitted_at is not None:
             sidecar["event_pipeline_lag_seconds"] = max(0.0, emitted_at - event_timestamp)
@@ -372,6 +378,88 @@ class OverlayStore:
             os.replace(tmp_path, path)
         except Exception as exc:
             logger.warning("overlay_store.snapshot_sidecar_failed path=%s error=%s", path, exc)
+
+    def _draw_snapshot_events(
+        self,
+        image: "cv2.typing.MatLike",
+        events: List[Dict[str, object]],
+    ) -> None:
+        if image is None or not events:
+            return
+        height, width = image.shape[:2]
+        seen = set()
+        event_lines = []
+        for event in events:
+            event_type = _get_str(event, "event_type")
+            if event_type is None:
+                continue
+            label = self._snapshot_event_label(event, event_type)
+            bbox = _normalize_bbox(event.get("bbox"), width, height)
+            if bbox is not None:
+                key = (bbox, label)
+                if key in seen:
+                    continue
+                seen.add(key)
+                color = _event_color(event_type)
+                x1, y1, x2, y2 = bbox
+                cv2.rectangle(image, (x1, y1), (x2, y2), color, 2)
+                self._draw_label(image, label, x1, max(0, y1 - 6), color)
+            else:
+                key = ("line", label)
+                if key in seen:
+                    continue
+                seen.add(key)
+                event_lines.append(label)
+
+        if event_lines:
+            max_lines = min(8, len(event_lines))
+            for i in range(max_lines):
+                text = event_lines[i]
+                y = 22 + (i * 18)
+                self._draw_label(image, text, 8, y, (255, 255, 255))
+        summary = f"events: {len(events)}"
+        self._draw_label(image, summary, 8, height - 12, (80, 80, 80))
+
+    @staticmethod
+    def _draw_label(
+        image: "cv2.typing.MatLike",
+        text: str,
+        x: int,
+        y: int,
+        color: Tuple[int, int, int],
+    ) -> None:
+        if not text:
+            return
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        scale = 0.5
+        thickness = 1
+        (tw, th), baseline = cv2.getTextSize(text, font, scale, thickness)
+        x = max(0, x)
+        y = max(th + baseline, y)
+        bg_tl = (x, max(0, y - th - baseline - 2))
+        bg_br = (min(image.shape[1] - 1, x + tw + 4), min(image.shape[0] - 1, y + 2))
+        cv2.rectangle(image, bg_tl, bg_br, (0, 0, 0), -1)
+        cv2.putText(image, text, (x + 2, y - 2), font, scale, color, thickness, cv2.LINE_AA)
+
+    @staticmethod
+    def _snapshot_event_label(event: Dict[str, object], event_type: str) -> str:
+        parts = [event_type]
+        person_id = _get_str(event, "person_id")
+        if person_id:
+            parts.append(person_id)
+        object_type = _get_str(event, "object_type")
+        if object_type:
+            parts.append(object_type)
+        orientation = _get_str(event, "orientation")
+        if orientation:
+            parts.append(orientation)
+        status = _get_str(event, "status")
+        if status:
+            parts.append(status)
+        confidence = _get_optional_float(event, "confidence")
+        if confidence is not None:
+            parts.append(f"{confidence:.2f}")
+        return " | ".join(parts[:4])
 
     def _append_index(self, dir_path: str, ts: int, events: list) -> None:
         date_key = time.strftime("%Y-%m-%d", time.localtime(ts))
@@ -478,3 +566,51 @@ def _get_optional_float(event: Dict[str, object], key: str) -> Optional[float]:
         except ValueError:
             return None
     return None
+
+
+def _get_str(event: Dict[str, object], key: str) -> Optional[str]:
+    value = event.get(key)
+    if isinstance(value, str):
+        text = value.strip()
+        if text:
+            return text
+    return None
+
+
+def _normalize_bbox(
+    raw: object,
+    width: int,
+    height: int,
+) -> Optional[Tuple[int, int, int, int]]:
+    if not isinstance(raw, (list, tuple)) or len(raw) != 4:
+        return None
+    try:
+        x1 = int(float(raw[0]))
+        y1 = int(float(raw[1]))
+        x2 = int(float(raw[2]))
+        y2 = int(float(raw[3]))
+    except (TypeError, ValueError):
+        return None
+    x1 = max(0, min(width - 1, x1))
+    y1 = max(0, min(height - 1, y1))
+    x2 = max(0, min(width - 1, x2))
+    y2 = max(0, min(height - 1, y2))
+    if x2 <= x1 or y2 <= y1:
+        return None
+    return (x1, y1, x2, y2)
+
+
+def _event_color(event_type: str) -> Tuple[int, int, int]:
+    if event_type.startswith("person_"):
+        return (0, 220, 0)
+    if event_type.startswith("object_"):
+        return (0, 180, 255)
+    if event_type == "role_assigned":
+        return (255, 215, 0)
+    if event_type == "proximity_event":
+        return (0, 255, 255)
+    if event_type.startswith("group_"):
+        return (255, 120, 0)
+    if event_type == "head_orientation_changed":
+        return (255, 0, 255)
+    return (240, 240, 240)
