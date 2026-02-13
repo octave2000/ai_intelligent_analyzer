@@ -613,4 +613,6 @@ def _event_color(event_type: str) -> Tuple[int, int, int]:
         return (255, 120, 0)
     if event_type == "head_orientation_changed":
         return (255, 0, 255)
+    if event_type == "body_movement":
+        return (255, 64, 0)
     return (240, 240, 240)

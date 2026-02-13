@@ -198,6 +198,9 @@ class Settings:
     perception_uniform_min_ratio: float
     perception_teacher_height_ratio: float
     perception_orientation_motion_threshold: float
+    perception_body_movement_enabled: bool
+    perception_body_movement_min_delta_pixels: float
+    perception_body_movement_emit_interval_seconds: float
     perception_identity_min_interval_seconds: float
     perception_identity_sticky_score: float
     perception_proximity_distance_ratio: float
@@ -206,10 +209,14 @@ class Settings:
     perception_group_duration_seconds: float
     perception_detection_width: int
     perception_detection_height: int
+    perception_event_queue_maxlen: int
     perception_exam_mode: bool
     perception_max_cameras_per_tick: int
     perception_dual_detect_test: bool
     event_timestamp_offset_seconds: float
+    event_timestamp_stabilize_alpha: float
+    event_timestamp_stabilize_max_correction_seconds: float
+    event_timestamp_round_seconds: float
     roster_path: str
     attendance_path: str
     face_similarity_threshold: float
@@ -296,6 +303,18 @@ class Settings:
             "EVENT_TIMESTAMP_OFFSET_SECONDS",
             0.0,
         )
+        self.event_timestamp_stabilize_alpha = _get_float(
+            "EVENT_TIMESTAMP_STABILIZE_ALPHA",
+            0.12,
+        )
+        self.event_timestamp_stabilize_max_correction_seconds = _get_float(
+            "EVENT_TIMESTAMP_STABILIZE_MAX_CORRECTION_SECONDS",
+            1.5,
+        )
+        self.event_timestamp_round_seconds = _get_float(
+            "EVENT_TIMESTAMP_ROUND_SECONDS",
+            0.0,
+        )
         self.perception_track_ttl_seconds = _get_float("PERCEPTION_TRACK_TTL_SECONDS", 2.5)
         self.perception_object_ttl_seconds = _get_float("PERCEPTION_OBJECT_TTL_SECONDS", 3.0)
         self.perception_object_persist_frames = _get_int(
@@ -328,6 +347,15 @@ class Settings:
         self.perception_orientation_motion_threshold = _get_float(
             "PERCEPTION_ORIENTATION_MOTION_THRESHOLD", 10.0
         )
+        self.perception_body_movement_enabled = _get_bool(
+            "PERCEPTION_BODY_MOVEMENT_ENABLED", True
+        )
+        self.perception_body_movement_min_delta_pixels = _get_float(
+            "PERCEPTION_BODY_MOVEMENT_MIN_DELTA_PIXELS", 1.0
+        )
+        self.perception_body_movement_emit_interval_seconds = _get_float(
+            "PERCEPTION_BODY_MOVEMENT_EMIT_INTERVAL_SECONDS", 0.0
+        )
         self.perception_identity_min_interval_seconds = _get_float(
             "PERCEPTION_IDENTITY_MIN_INTERVAL_SECONDS", 0.3
         )
@@ -348,6 +376,9 @@ class Settings:
         )
         self.perception_detection_width = _get_int("PERCEPTION_DETECTION_WIDTH", 640)
         self.perception_detection_height = _get_int("PERCEPTION_DETECTION_HEIGHT", 360)
+        self.perception_event_queue_maxlen = _get_int(
+            "PERCEPTION_EVENT_QUEUE_MAXLEN", 10000
+        )
         self.perception_max_cameras_per_tick = _get_int(
             "PERCEPTION_MAX_CAMERAS_PER_TICK", 8
         )

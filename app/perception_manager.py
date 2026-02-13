@@ -50,6 +50,7 @@ class TrackState:
     identity_role: Optional[str] = None
     identity_score: float = 0.0
     last_identity_time: float = 0.0
+    last_body_movement_emit: float = 0.0
 
 
 @dataclass
@@ -81,8 +82,10 @@ class CameraPerceptionState:
     last_frame_source_timestamp: Optional[float] = None
     last_frame_timestamp: Optional[float] = None
     last_frame_timestamp_offset_seconds: float = 0.0
+    last_frame_timestamp_stabilizer_skew_seconds: float = 0.0
     last_frame_age_seconds: Optional[float] = None
     last_frame_transport_delay_seconds: Optional[float] = None
+    timestamp_delay_ema_seconds: Optional[float] = None
     lock: threading.Lock = field(default_factory=threading.Lock)
     proximity_state: Dict[Tuple[int, int], Tuple[bool, float, bool]] = field(default_factory=dict)
     group_state: Dict[frozenset, Tuple[int, float, bool]] = field(default_factory=dict)
@@ -162,6 +165,9 @@ class PerceptionManager:
         uniform_min_ratio: float,
         teacher_height_ratio: float,
         orientation_motion_threshold: float,
+        body_movement_enabled: bool,
+        body_movement_min_delta_pixels: float,
+        body_movement_emit_interval_seconds: float,
         identity_min_interval_seconds: float,
         identity_sticky_score: float,
         proximity_distance_ratio: float,
@@ -170,10 +176,14 @@ class PerceptionManager:
         group_duration_seconds: float,
         detection_width: int,
         detection_height: int,
+        event_queue_maxlen: int,
         exam_mode: bool,
         max_cameras_per_tick: int,
         event_max_frame_age_seconds: float,
         event_timestamp_offset_seconds: float,
+        event_timestamp_stabilize_alpha: float,
+        event_timestamp_stabilize_max_correction_seconds: float,
+        event_timestamp_round_seconds: float,
         dual_detect_test: bool,
         pipeline_tag: str = "p1",
         face_identifier: Optional[FaceIdentifier] = None,
@@ -199,6 +209,11 @@ class PerceptionManager:
         self.uniform_min_ratio = uniform_min_ratio
         self.teacher_height_ratio = teacher_height_ratio
         self.orientation_motion_threshold = orientation_motion_threshold
+        self.body_movement_enabled = body_movement_enabled
+        self.body_movement_min_delta_pixels = max(0.0, body_movement_min_delta_pixels)
+        self.body_movement_emit_interval_seconds = max(
+            0.0, body_movement_emit_interval_seconds
+        )
         self.identity_min_interval_seconds = max(0.05, identity_min_interval_seconds)
         self.identity_sticky_score = max(0.0, min(1.0, identity_sticky_score))
         self.proximity_distance_ratio = proximity_distance_ratio
@@ -207,10 +222,18 @@ class PerceptionManager:
         self.group_duration_seconds = group_duration_seconds
         self.detection_width = detection_width
         self.detection_height = detection_height
+        self.event_queue_maxlen = max(1000, event_queue_maxlen)
         self.exam_mode = exam_mode
         self.max_cameras_per_tick = max(1, max_cameras_per_tick)
         self.event_max_frame_age_seconds = max(0.0, event_max_frame_age_seconds)
         self.event_timestamp_offset_seconds = event_timestamp_offset_seconds
+        self.event_timestamp_stabilize_alpha = max(
+            0.0, min(1.0, event_timestamp_stabilize_alpha)
+        )
+        self.event_timestamp_stabilize_max_correction_seconds = max(
+            0.0, event_timestamp_stabilize_max_correction_seconds
+        )
+        self.event_timestamp_round_seconds = max(0.0, event_timestamp_round_seconds)
         self.dual_detect_test = dual_detect_test
         self.pipeline_tag = pipeline_tag
         self.face_identifier = face_identifier
@@ -227,7 +250,7 @@ class PerceptionManager:
         self._lock = threading.Lock()
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
-        self._events: Deque[Dict[str, object]] = deque(maxlen=2000)
+        self._events: Deque[Dict[str, object]] = deque(maxlen=self.event_queue_maxlen)
         self._events_lock = threading.Lock()
         self._resolver = GlobalIdentityResolver(
             similarity_threshold=global_similarity_threshold,
@@ -502,15 +525,19 @@ class PerceptionManager:
                 error = "frame_too_old"
                 return
             source_ts = ts
-            event_ts = source_ts + self.event_timestamp_offset_seconds
+            event_ts, stabilizer_skew = self._stable_event_timestamp(
+                state,
+                source_ts,
+                arrival_ts,
+            )
             frame_age_seconds = now - event_ts
-            frame_transport_delay_seconds = max(0.0, arrival_ts - source_ts)
+            frame_transport_delay_seconds = arrival_ts - source_ts
+            effective_offset_seconds = event_ts - source_ts
             with state.lock:
                 state.last_frame_source_timestamp = source_ts
                 state.last_frame_timestamp = event_ts
-                state.last_frame_timestamp_offset_seconds = (
-                    self.event_timestamp_offset_seconds
-                )
+                state.last_frame_timestamp_offset_seconds = effective_offset_seconds
+                state.last_frame_timestamp_stabilizer_skew_seconds = stabilizer_skew
                 state.last_frame_age_seconds = frame_age_seconds
                 state.last_frame_transport_delay_seconds = frame_transport_delay_seconds
 
@@ -578,7 +605,7 @@ class PerceptionManager:
                         1.0,
                         None,
                         {
-                            "frame_timestamp": ts,
+                            "frame_timestamp": event_ts,
                             "detections_count": len(detections),
                             "objects_count": len(objects),
                             "secondary_detections_count": len(secondary_people)
@@ -592,7 +619,7 @@ class PerceptionManager:
                         state.room_id,
                         state.camera_id,
                         frame,
-                        timestamp=ts,
+                        timestamp=event_ts,
                     )
                 if self.attention_manager is not None:
                     track_summaries = [
@@ -609,7 +636,7 @@ class PerceptionManager:
                         state.camera_id,
                         state.role,
                         frame,
-                        ts,
+                        event_ts,
                         track_summaries,
                     )
             success = True
@@ -622,6 +649,40 @@ class PerceptionManager:
             )
         finally:
             self._update_processing_stats(state, start, success, error)
+
+    def _stable_event_timestamp(
+        self,
+        state: CameraPerceptionState,
+        source_ts: float,
+        arrival_ts: float,
+    ) -> Tuple[float, float]:
+        event_ts = source_ts + self.event_timestamp_offset_seconds
+        skew = 0.0
+        if (
+            self.event_timestamp_stabilize_alpha > 0.0
+            and math.isfinite(source_ts)
+            and math.isfinite(arrival_ts)
+        ):
+            observed_delay = arrival_ts - source_ts
+            delay_ema = state.timestamp_delay_ema_seconds
+            if delay_ema is None or not math.isfinite(delay_ema):
+                delay_ema = observed_delay
+            else:
+                alpha = self.event_timestamp_stabilize_alpha
+                delay_ema = (1.0 - alpha) * delay_ema + alpha * observed_delay
+            state.timestamp_delay_ema_seconds = delay_ema
+            skew = observed_delay - delay_ema
+            max_correction = self.event_timestamp_stabilize_max_correction_seconds
+            if max_correction > 0.0:
+                if skew > max_correction:
+                    skew = max_correction
+                elif skew < -max_correction:
+                    skew = -max_correction
+            event_ts += skew
+        if self.event_timestamp_round_seconds > 0.0:
+            step = self.event_timestamp_round_seconds
+            event_ts = round(event_ts / step) * step
+        return event_ts, skew
 
     @staticmethod
     def _update_processing_stats(
@@ -718,6 +779,7 @@ class PerceptionManager:
                 )
             , frame=frame)
             self._update_role(state, track, frame)
+            self._update_body_movement(state, track, detection, frame)
             self._update_orientation(state, track)
             matched_track_ids.add(track_id)
             matched_detection_ids.add(det_idx)
@@ -924,6 +986,52 @@ class PerceptionManager:
                     },
                 )
             )
+
+    def _update_body_movement(
+        self,
+        state: CameraPerceptionState,
+        track: TrackState,
+        detection: Detection,
+        frame: "cv2.typing.MatLike",
+    ) -> None:
+        if not self.body_movement_enabled:
+            return
+        if len(track.history) < 2:
+            return
+        now = time.time()
+        if (
+            self.body_movement_emit_interval_seconds > 0.0
+            and now - track.last_body_movement_emit
+            < self.body_movement_emit_interval_seconds
+        ):
+            return
+        (x1, y1), (x2, y2) = track.history[-2], track.history[-1]
+        dx = x2 - x1
+        dy = y2 - y1
+        distance = math.hypot(dx, dy)
+        if distance < self.body_movement_min_delta_pixels:
+            return
+        track.last_body_movement_emit = now
+        confidence = min(1.0, 0.3 + min(0.7, distance / 40.0))
+        self._emit(
+            _event(
+                state,
+                "body_movement",
+                confidence,
+                track.global_id,
+                {
+                    "track_id": track.track_id,
+                    "bbox": detection.bbox,
+                    "dx_pixels": dx,
+                    "dy_pixels": dy,
+                    "distance_pixels": distance,
+                    "person_id": self._person_id_for_track(track),
+                    "person_name": track.identity_name,
+                    "person_role": track.identity_role,
+                },
+            ),
+            frame=frame,
+        )
 
     def _detect_objects(self, frame: "cv2.typing.MatLike") -> List[ObjectDetection]:
         if self.yolo_detector is not None and self.yolo_detector.ready():
@@ -1393,6 +1501,10 @@ def _event(
         data["frame_source_timestamp"] = state.last_frame_source_timestamp
     if state.last_frame_timestamp_offset_seconds != 0.0:
         data["timestamp_offset_seconds"] = state.last_frame_timestamp_offset_seconds
+    if state.last_frame_timestamp_stabilizer_skew_seconds != 0.0:
+        data["timestamp_stabilizer_skew_seconds"] = (
+            state.last_frame_timestamp_stabilizer_skew_seconds
+        )
     if state.last_frame_age_seconds is not None:
         data["frame_age_seconds"] = state.last_frame_age_seconds
     if state.last_frame_transport_delay_seconds is not None:

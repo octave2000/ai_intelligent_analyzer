@@ -102,6 +102,13 @@ def create_app() -> FastAPI:
         uniform_min_ratio=settings.perception_uniform_min_ratio,
         teacher_height_ratio=settings.perception_teacher_height_ratio,
         orientation_motion_threshold=settings.perception_orientation_motion_threshold,
+        body_movement_enabled=settings.perception_body_movement_enabled,
+        body_movement_min_delta_pixels=(
+            settings.perception_body_movement_min_delta_pixels
+        ),
+        body_movement_emit_interval_seconds=(
+            settings.perception_body_movement_emit_interval_seconds
+        ),
         identity_min_interval_seconds=settings.perception_identity_min_interval_seconds,
         identity_sticky_score=settings.perception_identity_sticky_score,
         proximity_distance_ratio=settings.perception_proximity_distance_ratio,
@@ -110,11 +117,17 @@ def create_app() -> FastAPI:
         group_duration_seconds=settings.perception_group_duration_seconds,
         detection_width=settings.perception_detection_width,
         detection_height=settings.perception_detection_height,
+        event_queue_maxlen=settings.perception_event_queue_maxlen,
         exam_mode=settings.perception_exam_mode,
         max_cameras_per_tick=settings.perception_max_cameras_per_tick,
         event_max_frame_age_seconds=settings.event_max_frame_age_seconds,
         event_timestamp_offset_seconds=settings.event_timestamp_offset_seconds,
-        dual_detect_test=False,
+        event_timestamp_stabilize_alpha=settings.event_timestamp_stabilize_alpha,
+        event_timestamp_stabilize_max_correction_seconds=(
+            settings.event_timestamp_stabilize_max_correction_seconds
+        ),
+        event_timestamp_round_seconds=settings.event_timestamp_round_seconds,
+        dual_detect_test=settings.perception_dual_detect_test,
         pipeline_tag="p1",
         face_identifier=face_identifier,
         attendance=attendance,

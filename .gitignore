@@ -6,6 +6,7 @@ venv/
 *.jpg
 .DS_Store
 .env
+.env.example
 # Data & models
 models/
 *.pt
