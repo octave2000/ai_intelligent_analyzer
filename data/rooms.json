@@ -1,8 +1,22 @@
 {
   "room1": {
+    "front": {
+      "role": "front",
+      "url": "rtsp://154.65.106.118:8554/camera2"
+    },
     "back": {
       "role": "back",
-      "url": "rtsp://154.65.106.118:8554/camera2"
+      "url": "rtsp://154.65.106.118:8554/camera4"
+    }
+  },
+  "room2": {
+    "front": {
+      "role": "front",
+      "url": "rtsp://154.65.106.118:8554/camera1"
+    },
+    "back": {
+      "role": "back",
+      "url": "rtsp://154.65.106.118:8554/camera3"
     }
   }
 }
