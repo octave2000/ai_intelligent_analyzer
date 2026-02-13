@@ -76,8 +76,6 @@ class AttentionManager:
         timestamp: float,
         tracks: List[TrackSummary],
     ) -> None:
-        if role != "front":
-            return
         key = f"{room_id}:{camera_id}"
         with self._lock:
             state = self._cameras.get(key)

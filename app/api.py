@@ -119,6 +119,55 @@ def build_router(
     def inference_outputs(limit: int = 200, since: Optional[float] = None) -> dict:
         return {"outputs": inference.get_outputs(limit=limit, since=since)}
 
+    @router.get("/inference/behavior")
+    def inference_behavior_outputs(
+        limit: int = 200,
+        since: Optional[float] = None,
+        room_id: Optional[str] = None,
+    ) -> dict:
+        raw_limit = max(200, min(5000, limit * 5))
+        outputs = inference.get_outputs(limit=raw_limit, since=since)
+        behavior_types = {
+            "teacher_engagement",
+            "teacher_device_usage",
+            "teacher_student_interaction",
+            "teacher_absence",
+            "attention_summary",
+            "participation_summary",
+            "student_sleep_risk",
+            "student_device_distraction",
+            "student_behavior_summary",
+            "offtask_movement",
+            "group_participation_summary",
+            "group_collaboration",
+            "lesson_comprehensive_summary",
+        }
+        filtered = []
+        for output in outputs:
+            if output.get("type") not in behavior_types:
+                continue
+            if room_id is not None and output.get("room_id") != room_id:
+                continue
+            filtered.append(output)
+        return {"outputs": filtered[-max(1, min(1000, limit)) :]}
+
+    @router.get("/inference/lesson-summary")
+    def inference_lesson_summary(
+        limit: int = 20,
+        since: Optional[float] = None,
+        room_id: Optional[str] = None,
+    ) -> dict:
+        raw_limit = max(200, min(5000, limit * 20))
+        outputs = inference.get_outputs(limit=raw_limit, since=since)
+        summaries = []
+        for output in outputs:
+            if output.get("type") != "lesson_comprehensive_summary":
+                continue
+            if room_id is not None and output.get("room_id") != room_id:
+                continue
+            summaries.append(output)
+        return {"summaries": summaries[-max(1, min(200, limit)) :]}
+
     @router.get("/attendance/today")
     def attendance_today() -> dict:
         date_key = time.strftime("%Y-%m-%d", time.localtime())
@@ -147,7 +196,7 @@ def build_router(
                 "ready": yolo_detector.ready() if yolo_detector is not None else False,
                 "model_path": yolo_detector.model_path if yolo_detector is not None else None,
             },
-            "activity": gate.all_activity(),
+            "activity": perception.health(),
             "attendance": {
                 "date": date_key,
                 "count": len(attendance.get_attendance(date_key)),

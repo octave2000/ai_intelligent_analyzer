@@ -51,6 +51,13 @@ class TrackState:
     identity_score: float = 0.0
     last_identity_time: float = 0.0
     last_body_movement_emit: float = 0.0
+    posture: str = "upright"
+    upright_height_ema: float = 0.0
+    down_since: float = 0.0
+    bowing_since: float = 0.0
+    last_sleep_emit: float = 0.0
+    last_device_emit: float = 0.0
+    last_phone_emit: float = 0.0
 
 
 @dataclass
@@ -168,6 +175,13 @@ class PerceptionManager:
         body_movement_enabled: bool,
         body_movement_min_delta_pixels: float,
         body_movement_emit_interval_seconds: float,
+        posture_height_ema_alpha: float,
+        sleep_bow_ratio_threshold: float,
+        sleep_bow_aspect_min: float,
+        sleep_min_seconds: float,
+        sleep_emit_interval_seconds: float,
+        device_usage_emit_interval_seconds: float,
+        phone_usage_emit_interval_seconds: float,
         identity_min_interval_seconds: float,
         identity_sticky_score: float,
         proximity_distance_ratio: float,
@@ -213,6 +227,17 @@ class PerceptionManager:
         self.body_movement_min_delta_pixels = max(0.0, body_movement_min_delta_pixels)
         self.body_movement_emit_interval_seconds = max(
             0.0, body_movement_emit_interval_seconds
+        )
+        self.posture_height_ema_alpha = max(0.01, min(1.0, posture_height_ema_alpha))
+        self.sleep_bow_ratio_threshold = max(0.2, min(1.5, sleep_bow_ratio_threshold))
+        self.sleep_bow_aspect_min = max(0.05, min(2.0, sleep_bow_aspect_min))
+        self.sleep_min_seconds = max(0.1, sleep_min_seconds)
+        self.sleep_emit_interval_seconds = max(0.0, sleep_emit_interval_seconds)
+        self.device_usage_emit_interval_seconds = max(
+            0.0, device_usage_emit_interval_seconds
+        )
+        self.phone_usage_emit_interval_seconds = max(
+            0.0, phone_usage_emit_interval_seconds
         )
         self.identity_min_interval_seconds = max(0.05, identity_min_interval_seconds)
         self.identity_sticky_score = max(0.0, min(1.0, identity_sticky_score))
@@ -781,6 +806,7 @@ class PerceptionManager:
             self._update_role(state, track, frame)
             self._update_body_movement(state, track, detection, frame)
             self._update_orientation(state, track)
+            self._update_posture_state(state, track, frame)
             matched_track_ids.add(track_id)
             matched_detection_ids.add(det_idx)
             detection_track_ids[det_idx] = track_id
@@ -818,6 +844,7 @@ class PerceptionManager:
             , frame=frame)
             self._update_role(state, track, frame)
             self._update_orientation(state, track)
+            self._update_posture_state(state, track, frame)
 
         expired = [
             track_id
@@ -957,8 +984,6 @@ class PerceptionManager:
             )
 
     def _update_orientation(self, state: CameraPerceptionState, track: TrackState) -> None:
-        if not self.exam_mode:
-            return
         if len(track.history) < 2:
             return
         (x1, y1), (x2, y2) = track.history[-2], track.history[-1]
@@ -1028,6 +1053,128 @@ class PerceptionManager:
                     "person_id": self._person_id_for_track(track),
                     "person_name": track.identity_name,
                     "person_role": track.identity_role,
+                },
+            ),
+            frame=frame,
+        )
+
+    def _update_posture_state(
+        self,
+        state: CameraPerceptionState,
+        track: TrackState,
+        frame: "cv2.typing.MatLike",
+    ) -> None:
+        x1, y1, x2, y2 = track.bbox
+        height = max(1, y2 - y1)
+        width = max(1, x2 - x1)
+        now = time.time()
+        orientation = track.last_orientation or "forward"
+        role = self._role_for_track(track)
+
+        if orientation != "down":
+            if track.upright_height_ema <= 0.0:
+                track.upright_height_ema = float(height)
+            else:
+                alpha = self.posture_height_ema_alpha
+                track.upright_height_ema = (
+                    (1.0 - alpha) * track.upright_height_ema + alpha * float(height)
+                )
+            track.down_since = 0.0
+            track.bowing_since = 0.0
+            if track.posture != "upright":
+                track.posture = "upright"
+                self._emit(
+                    _event(
+                        state,
+                        "posture_changed",
+                        0.55,
+                        track.global_id,
+                        {
+                            "track_id": track.track_id,
+                            "posture": "upright",
+                            "orientation": orientation,
+                            "person_id": self._person_id_for_track(track),
+                            "person_name": track.identity_name,
+                            "person_role": track.identity_role,
+                            "role": role,
+                        },
+                    ),
+                    frame=frame,
+                )
+            return
+
+        if track.down_since <= 0.0:
+            track.down_since = now
+        baseline_height = (
+            track.upright_height_ema
+            if track.upright_height_ema > 1.0
+            else float(height)
+        )
+        bow_ratio = min(2.0, float(height) / max(1.0, baseline_height))
+        aspect_ratio = width / float(height)
+        is_bowing = (
+            bow_ratio <= self.sleep_bow_ratio_threshold
+            and aspect_ratio >= self.sleep_bow_aspect_min
+        )
+        posture = "bowing" if is_bowing else "upright"
+
+        if posture != track.posture:
+            track.posture = posture
+            self._emit(
+                _event(
+                    state,
+                    "posture_changed",
+                    0.6 if is_bowing else 0.55,
+                    track.global_id,
+                    {
+                        "track_id": track.track_id,
+                        "posture": posture,
+                        "orientation": orientation,
+                        "bow_ratio": bow_ratio,
+                        "aspect_ratio": aspect_ratio,
+                        "person_id": self._person_id_for_track(track),
+                        "person_name": track.identity_name,
+                        "person_role": track.identity_role,
+                        "role": role,
+                    },
+                ),
+                frame=frame,
+            )
+
+        if not is_bowing:
+            track.bowing_since = 0.0
+            return
+        if track.bowing_since <= 0.0:
+            track.bowing_since = now
+
+        bow_duration = now - track.bowing_since
+        down_duration = now - track.down_since
+        sleep_duration = min(bow_duration, down_duration)
+        if sleep_duration < self.sleep_min_seconds:
+            return
+        if now - track.last_sleep_emit < self.sleep_emit_interval_seconds:
+            return
+        track.last_sleep_emit = now
+        confidence = min(1.0, 0.5 + min(0.5, sleep_duration / 20.0))
+        self._emit(
+            _event(
+                state,
+                "sleeping_suspected",
+                confidence,
+                track.global_id,
+                {
+                    "track_id": track.track_id,
+                    "posture": "bowing",
+                    "orientation": orientation,
+                    "bow_ratio": bow_ratio,
+                    "aspect_ratio": aspect_ratio,
+                    "bowing_duration_seconds": bow_duration,
+                    "head_down_duration_seconds": down_duration,
+                    "sleep_duration_seconds": sleep_duration,
+                    "person_id": self._person_id_for_track(track),
+                    "person_name": track.identity_name,
+                    "person_role": track.identity_role,
+                    "role": role,
                 },
             ),
             frame=frame,
@@ -1289,6 +1436,7 @@ class PerceptionManager:
                     },
                 )
             , frame=frame)
+            self._maybe_emit_device_usage(state, best_track, detection, frame)
 
         if not self.exam_mode:
             return
@@ -1316,6 +1464,78 @@ class PerceptionManager:
                         },
                     )
                 , frame=frame)
+
+    @staticmethod
+    def _role_for_track(track: TrackState) -> str:
+        if isinstance(track.identity_role, str) and track.identity_role:
+            return track.identity_role
+        return track.role
+
+    def _maybe_emit_device_usage(
+        self,
+        state: CameraPerceptionState,
+        track: TrackState,
+        detection: ObjectDetection,
+        frame: "cv2.typing.MatLike",
+    ) -> None:
+        if detection.object_type not in {"phone", "tablet", "laptop", "device"}:
+            return
+        now = time.time()
+        role = self._role_for_track(track)
+        person_id = self._person_id_for_track(track)
+        if now - track.last_device_emit >= self.device_usage_emit_interval_seconds:
+            track.last_device_emit = now
+            self._emit(
+                _event(
+                    state,
+                    "device_usage_detected",
+                    min(1.0, detection.confidence + 0.1),
+                    track.global_id,
+                    {
+                        "track_id": track.track_id,
+                        "object_type": detection.object_type,
+                        "category": detection.category,
+                        "risk_level": detection.risk_level,
+                        "bbox": detection.bbox,
+                        "person_id": person_id,
+                        "person_name": track.identity_name,
+                        "person_role": track.identity_role,
+                        "role": role,
+                    },
+                ),
+                frame=frame,
+        )
+        if detection.object_type != "phone":
+            return
+        if now - track.last_phone_emit < self.phone_usage_emit_interval_seconds:
+            return
+        track.last_phone_emit = now
+        if role == "teacher":
+            event_type = "teacher_phone_usage"
+        elif role == "student":
+            event_type = "student_phone_usage"
+        else:
+            event_type = "phone_usage_detected"
+        self._emit(
+            _event(
+                state,
+                event_type,
+                min(1.0, detection.confidence + 0.15),
+                track.global_id,
+                {
+                    "track_id": track.track_id,
+                    "object_type": detection.object_type,
+                    "category": detection.category,
+                    "risk_level": detection.risk_level,
+                    "bbox": detection.bbox,
+                    "person_id": person_id,
+                    "person_name": track.identity_name,
+                    "person_role": track.identity_role,
+                    "role": role,
+                },
+            ),
+            frame=frame,
+        )
 
     def _update_proximity(self, state: CameraPerceptionState) -> None:
         tracks = list(state.tracks.values())

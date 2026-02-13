@@ -201,6 +201,13 @@ class Settings:
     perception_body_movement_enabled: bool
     perception_body_movement_min_delta_pixels: float
     perception_body_movement_emit_interval_seconds: float
+    perception_posture_height_ema_alpha: float
+    perception_sleep_bow_ratio_threshold: float
+    perception_sleep_bow_aspect_min: float
+    perception_sleep_min_seconds: float
+    perception_sleep_emit_interval_seconds: float
+    perception_device_usage_emit_interval_seconds: float
+    perception_phone_usage_emit_interval_seconds: float
     perception_identity_min_interval_seconds: float
     perception_identity_sticky_score: float
     perception_proximity_distance_ratio: float
@@ -272,6 +279,28 @@ class Settings:
     inference_fight_emit_interval_seconds: float
     inference_fight_motion_threshold: float
     inference_fight_proximity_threshold: int
+    inference_teacher_absence_threshold_seconds: float
+    inference_behavior_room_events_maxlen: int
+    inference_behavior_lesson_window_seconds: float
+    inference_behavior_lesson_emit_interval_seconds: float
+    inference_behavior_sleep_emit_interval_seconds: float
+    inference_behavior_device_emit_interval_seconds: float
+    inference_behavior_emit_interval_seconds: float
+    inference_behavior_cheating_min_score: float
+    inference_behavior_offtask_min_movement: float
+    inference_behavior_sleep_min_duration_seconds: float
+    inference_behavior_sleep_min_head_down_events: int
+    inference_behavior_sleep_min_bowing_events: int
+    inference_behavior_sleep_min_risk_score: float
+    inference_behavior_lesson_min_event_count: int
+    inference_behavior_lesson_teacher_focus_strength_threshold: float
+    inference_behavior_lesson_participation_strength_threshold: float
+    inference_behavior_lesson_teacher_activity_strength_threshold: float
+    inference_behavior_lesson_student_phone_concern_threshold: int
+    inference_behavior_lesson_teacher_phone_concern_threshold: int
+    inference_behavior_lesson_sleep_concern_threshold: int
+    inference_behavior_level_low_max: float
+    inference_behavior_level_medium_max: float
     schedule_path: str
     schedule_timezone: str
     teacher_zone_path: str
@@ -355,6 +384,27 @@ class Settings:
         )
         self.perception_body_movement_emit_interval_seconds = _get_float(
             "PERCEPTION_BODY_MOVEMENT_EMIT_INTERVAL_SECONDS", 0.0
+        )
+        self.perception_posture_height_ema_alpha = _get_float(
+            "PERCEPTION_POSTURE_HEIGHT_EMA_ALPHA", 0.15
+        )
+        self.perception_sleep_bow_ratio_threshold = _get_float(
+            "PERCEPTION_SLEEP_BOW_RATIO_THRESHOLD", 0.78
+        )
+        self.perception_sleep_bow_aspect_min = _get_float(
+            "PERCEPTION_SLEEP_BOW_ASPECT_MIN", 0.32
+        )
+        self.perception_sleep_min_seconds = _get_float(
+            "PERCEPTION_SLEEP_MIN_SECONDS", 8.0
+        )
+        self.perception_sleep_emit_interval_seconds = _get_float(
+            "PERCEPTION_SLEEP_EMIT_INTERVAL_SECONDS", 12.0
+        )
+        self.perception_device_usage_emit_interval_seconds = _get_float(
+            "PERCEPTION_DEVICE_USAGE_EMIT_INTERVAL_SECONDS", 5.0
+        )
+        self.perception_phone_usage_emit_interval_seconds = _get_float(
+            "PERCEPTION_PHONE_USAGE_EMIT_INTERVAL_SECONDS", 4.0
         )
         self.perception_identity_min_interval_seconds = _get_float(
             "PERCEPTION_IDENTITY_MIN_INTERVAL_SECONDS", 0.3
@@ -516,6 +566,72 @@ class Settings:
         )
         self.inference_fight_proximity_threshold = _get_int(
             "INFERENCE_FIGHT_PROXIMITY_THRESHOLD", 2
+        )
+        self.inference_teacher_absence_threshold_seconds = _get_float(
+            "INFERENCE_TEACHER_ABSENCE_THRESHOLD_SECONDS", 30.0
+        )
+        self.inference_behavior_room_events_maxlen = _get_int(
+            "INFERENCE_BEHAVIOR_ROOM_EVENTS_MAXLEN", 4000
+        )
+        self.inference_behavior_lesson_window_seconds = _get_float(
+            "INFERENCE_BEHAVIOR_LESSON_WINDOW_SECONDS", 300.0
+        )
+        self.inference_behavior_lesson_emit_interval_seconds = _get_float(
+            "INFERENCE_BEHAVIOR_LESSON_EMIT_INTERVAL_SECONDS", 60.0
+        )
+        self.inference_behavior_sleep_emit_interval_seconds = _get_float(
+            "INFERENCE_BEHAVIOR_SLEEP_EMIT_INTERVAL_SECONDS", 12.0
+        )
+        self.inference_behavior_device_emit_interval_seconds = _get_float(
+            "INFERENCE_BEHAVIOR_DEVICE_EMIT_INTERVAL_SECONDS", 10.0
+        )
+        self.inference_behavior_emit_interval_seconds = _get_float(
+            "INFERENCE_BEHAVIOR_EMIT_INTERVAL_SECONDS", 0.0
+        )
+        self.inference_behavior_cheating_min_score = _get_float(
+            "INFERENCE_BEHAVIOR_CHEATING_MIN_SCORE", 0.2
+        )
+        self.inference_behavior_offtask_min_movement = _get_float(
+            "INFERENCE_BEHAVIOR_OFFTASK_MIN_MOVEMENT", 200.0
+        )
+        self.inference_behavior_sleep_min_duration_seconds = _get_float(
+            "INFERENCE_BEHAVIOR_SLEEP_MIN_DURATION_SECONDS", 3.0
+        )
+        self.inference_behavior_sleep_min_head_down_events = _get_int(
+            "INFERENCE_BEHAVIOR_SLEEP_MIN_HEAD_DOWN_EVENTS", 3
+        )
+        self.inference_behavior_sleep_min_bowing_events = _get_int(
+            "INFERENCE_BEHAVIOR_SLEEP_MIN_BOWING_EVENTS", 2
+        )
+        self.inference_behavior_sleep_min_risk_score = _get_float(
+            "INFERENCE_BEHAVIOR_SLEEP_MIN_RISK_SCORE", 0.3
+        )
+        self.inference_behavior_lesson_min_event_count = _get_int(
+            "INFERENCE_BEHAVIOR_LESSON_MIN_EVENT_COUNT", 10
+        )
+        self.inference_behavior_lesson_teacher_focus_strength_threshold = _get_float(
+            "INFERENCE_BEHAVIOR_LESSON_TEACHER_FOCUS_STRENGTH_THRESHOLD", 0.6
+        )
+        self.inference_behavior_lesson_participation_strength_threshold = _get_float(
+            "INFERENCE_BEHAVIOR_LESSON_PARTICIPATION_STRENGTH_THRESHOLD", 0.6
+        )
+        self.inference_behavior_lesson_teacher_activity_strength_threshold = _get_float(
+            "INFERENCE_BEHAVIOR_LESSON_TEACHER_ACTIVITY_STRENGTH_THRESHOLD", 0.5
+        )
+        self.inference_behavior_lesson_student_phone_concern_threshold = _get_int(
+            "INFERENCE_BEHAVIOR_LESSON_STUDENT_PHONE_CONCERN_THRESHOLD", 3
+        )
+        self.inference_behavior_lesson_teacher_phone_concern_threshold = _get_int(
+            "INFERENCE_BEHAVIOR_LESSON_TEACHER_PHONE_CONCERN_THRESHOLD", 2
+        )
+        self.inference_behavior_lesson_sleep_concern_threshold = _get_int(
+            "INFERENCE_BEHAVIOR_LESSON_SLEEP_CONCERN_THRESHOLD", 2
+        )
+        self.inference_behavior_level_low_max = _get_float(
+            "INFERENCE_BEHAVIOR_LEVEL_LOW_MAX", 0.35
+        )
+        self.inference_behavior_level_medium_max = _get_float(
+            "INFERENCE_BEHAVIOR_LEVEL_MEDIUM_MAX", 0.65
         )
         self.schedule_path = os.getenv("SCHEDULE_PATH", "data/schedule.json")
         self.schedule_timezone = os.getenv("SCHEDULE_TZ", "Africa/Kigali")

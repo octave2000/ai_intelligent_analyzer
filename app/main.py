@@ -109,6 +109,17 @@ def create_app() -> FastAPI:
         body_movement_emit_interval_seconds=(
             settings.perception_body_movement_emit_interval_seconds
         ),
+        posture_height_ema_alpha=settings.perception_posture_height_ema_alpha,
+        sleep_bow_ratio_threshold=settings.perception_sleep_bow_ratio_threshold,
+        sleep_bow_aspect_min=settings.perception_sleep_bow_aspect_min,
+        sleep_min_seconds=settings.perception_sleep_min_seconds,
+        sleep_emit_interval_seconds=settings.perception_sleep_emit_interval_seconds,
+        device_usage_emit_interval_seconds=(
+            settings.perception_device_usage_emit_interval_seconds
+        ),
+        phone_usage_emit_interval_seconds=(
+            settings.perception_phone_usage_emit_interval_seconds
+        ),
         identity_min_interval_seconds=settings.perception_identity_min_interval_seconds,
         identity_sticky_score=settings.perception_identity_sticky_score,
         proximity_distance_ratio=settings.perception_proximity_distance_ratio,
@@ -139,17 +150,15 @@ def create_app() -> FastAPI:
         object_label_map=settings.object_label_map,
     )
     zone_config = TeacherZoneConfig(settings.teacher_zone_path)
-    attention_manager = None
-    if settings.attention_enable:
-        attention_manager = AttentionManager(
-            interval_seconds=settings.attention_interval_seconds,
-            downscale_width=settings.attention_downscale_width,
-            downscale_height=settings.attention_downscale_height,
-            max_faces=settings.attention_max_faces,
-            zone_config=zone_config,
-            emit_callback=perception_1.emit_external_event,
-        )
-        perception_1.attention_manager = attention_manager
+    attention_manager = AttentionManager(
+        interval_seconds=settings.attention_interval_seconds,
+        downscale_width=settings.attention_downscale_width,
+        downscale_height=settings.attention_downscale_height,
+        max_faces=settings.attention_max_faces,
+        zone_config=zone_config,
+        emit_callback=perception_1.emit_external_event,
+    )
+    perception_1.attention_manager = attention_manager
     perception_1.bootstrap_from_stream_manager()
     schedule = ScheduleManager(settings.schedule_path, settings.schedule_timezone)
     inference = InferenceManager(
@@ -167,6 +176,64 @@ def create_app() -> FastAPI:
         fight_emit_interval_seconds=settings.inference_fight_emit_interval_seconds,
         fight_motion_threshold=settings.inference_fight_motion_threshold,
         fight_proximity_threshold=settings.inference_fight_proximity_threshold,
+        teacher_absence_threshold_seconds=(
+            settings.inference_teacher_absence_threshold_seconds
+        ),
+        behavior_room_events_maxlen=settings.inference_behavior_room_events_maxlen,
+        behavior_lesson_window_seconds=(
+            settings.inference_behavior_lesson_window_seconds
+        ),
+        behavior_lesson_emit_interval_seconds=(
+            settings.inference_behavior_lesson_emit_interval_seconds
+        ),
+        behavior_sleep_emit_interval_seconds=(
+            settings.inference_behavior_sleep_emit_interval_seconds
+        ),
+        behavior_device_emit_interval_seconds=(
+            settings.inference_behavior_device_emit_interval_seconds
+        ),
+        behavior_emit_interval_seconds=(
+            settings.inference_behavior_emit_interval_seconds
+        ),
+        behavior_cheating_min_score=settings.inference_behavior_cheating_min_score,
+        behavior_offtask_min_movement=(
+            settings.inference_behavior_offtask_min_movement
+        ),
+        behavior_sleep_min_duration_seconds=(
+            settings.inference_behavior_sleep_min_duration_seconds
+        ),
+        behavior_sleep_min_head_down_events=(
+            settings.inference_behavior_sleep_min_head_down_events
+        ),
+        behavior_sleep_min_bowing_events=(
+            settings.inference_behavior_sleep_min_bowing_events
+        ),
+        behavior_sleep_min_risk_score=(
+            settings.inference_behavior_sleep_min_risk_score
+        ),
+        behavior_lesson_min_event_count=(
+            settings.inference_behavior_lesson_min_event_count
+        ),
+        behavior_lesson_teacher_focus_strength_threshold=(
+            settings.inference_behavior_lesson_teacher_focus_strength_threshold
+        ),
+        behavior_lesson_participation_strength_threshold=(
+            settings.inference_behavior_lesson_participation_strength_threshold
+        ),
+        behavior_lesson_teacher_activity_strength_threshold=(
+            settings.inference_behavior_lesson_teacher_activity_strength_threshold
+        ),
+        behavior_lesson_student_phone_concern_threshold=(
+            settings.inference_behavior_lesson_student_phone_concern_threshold
+        ),
+        behavior_lesson_teacher_phone_concern_threshold=(
+            settings.inference_behavior_lesson_teacher_phone_concern_threshold
+        ),
+        behavior_lesson_sleep_concern_threshold=(
+            settings.inference_behavior_lesson_sleep_concern_threshold
+        ),
+        behavior_level_low_max=settings.inference_behavior_level_low_max,
+        behavior_level_medium_max=settings.inference_behavior_level_medium_max,
     )
 
     @app.on_event("startup")
