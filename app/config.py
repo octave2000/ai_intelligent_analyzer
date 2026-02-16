@@ -196,6 +196,19 @@ class Settings:
     perception_uniform_hsv_low: tuple
     perception_uniform_hsv_high: tuple
     perception_uniform_min_ratio: float
+    perception_student_top_hsv_low: tuple
+    perception_student_top_hsv_high: tuple
+    perception_student_bottom_hsv_low: tuple
+    perception_student_bottom_hsv_high: tuple
+    perception_student_bottom_hsv_low_2: tuple
+    perception_student_bottom_hsv_high_2: tuple
+    perception_student_top_min_ratio: float
+    perception_student_bottom_min_ratio: float
+    perception_student_top_only_min_ratio: float
+    perception_student_top_only_max_bottom_ratio: float
+    perception_student_seated_max_height_ratio: float
+    perception_teacher_min_hits: int
+    perception_role_decision_margin: float
     perception_teacher_height_ratio: float
     perception_orientation_motion_threshold: float
     perception_body_movement_enabled: bool
@@ -226,6 +239,7 @@ class Settings:
     event_timestamp_round_seconds: float
     roster_path: str
     attendance_path: str
+    face_recognition_enabled: bool
     face_similarity_threshold: float
     face_det_min_score: float
     face_enhance_enable: bool
@@ -370,14 +384,53 @@ class Settings:
         self.perception_uniform_min_ratio = _get_float(
             "PERCEPTION_UNIFORM_MIN_RATIO", 1.1
         )
+        self.perception_student_top_hsv_low = _get_int_tuple(
+            "PERCEPTION_STUDENT_TOP_HSV_LOW", (0, 0, 165)
+        )
+        self.perception_student_top_hsv_high = _get_int_tuple(
+            "PERCEPTION_STUDENT_TOP_HSV_HIGH", (179, 75, 255)
+        )
+        self.perception_student_bottom_hsv_low = _get_int_tuple(
+            "PERCEPTION_STUDENT_BOTTOM_HSV_LOW", (0, 80, 40)
+        )
+        self.perception_student_bottom_hsv_high = _get_int_tuple(
+            "PERCEPTION_STUDENT_BOTTOM_HSV_HIGH", (12, 255, 255)
+        )
+        self.perception_student_bottom_hsv_low_2 = _get_int_tuple(
+            "PERCEPTION_STUDENT_BOTTOM_HSV_LOW_2", (165, 80, 40)
+        )
+        self.perception_student_bottom_hsv_high_2 = _get_int_tuple(
+            "PERCEPTION_STUDENT_BOTTOM_HSV_HIGH_2", (179, 255, 255)
+        )
+        self.perception_student_top_min_ratio = _get_float(
+            "PERCEPTION_STUDENT_TOP_MIN_RATIO", 0.14
+        )
+        self.perception_student_bottom_min_ratio = _get_float(
+            "PERCEPTION_STUDENT_BOTTOM_MIN_RATIO", 0.12
+        )
+        self.perception_student_top_only_min_ratio = _get_float(
+            "PERCEPTION_STUDENT_TOP_ONLY_MIN_RATIO", 0.17
+        )
+        self.perception_student_top_only_max_bottom_ratio = _get_float(
+            "PERCEPTION_STUDENT_TOP_ONLY_MAX_BOTTOM_RATIO", 0.09
+        )
+        self.perception_student_seated_max_height_ratio = _get_float(
+            "PERCEPTION_STUDENT_SEATED_MAX_HEIGHT_RATIO", 0.42
+        )
+        self.perception_teacher_min_hits = _get_int(
+            "PERCEPTION_TEACHER_MIN_HITS", 5
+        )
+        self.perception_role_decision_margin = _get_float(
+            "PERCEPTION_ROLE_DECISION_MARGIN", 0.08
+        )
         self.perception_teacher_height_ratio = _get_float(
-            "PERCEPTION_TEACHER_HEIGHT_RATIO", 0.6
+            "PERCEPTION_TEACHER_HEIGHT_RATIO", 0.45
         )
         self.perception_orientation_motion_threshold = _get_float(
             "PERCEPTION_ORIENTATION_MOTION_THRESHOLD", 10.0
         )
         self.perception_body_movement_enabled = _get_bool(
-            "PERCEPTION_BODY_MOVEMENT_ENABLED", True
+            "PERCEPTION_BODY_MOVEMENT_ENABLED", False
         )
         self.perception_body_movement_min_delta_pixels = _get_float(
             "PERCEPTION_BODY_MOVEMENT_MIN_DELTA_PIXELS", 1.0
@@ -441,6 +494,7 @@ class Settings:
         )
         self.roster_path = os.getenv("ROSTER_PATH", "data/roster.json")
         self.attendance_path = os.getenv("ATTENDANCE_PATH", "data/attendance.json")
+        self.face_recognition_enabled = _get_bool("FACE_RECOGNITION_ENABLED", True)
         self.face_similarity_threshold = _get_float(
             "FACE_SIMILARITY_THRESHOLD", 0.25
         )
@@ -512,22 +566,11 @@ class Settings:
                 "phone",
                 "laptop",
                 "tablet",
-                "book",
-                "paper",
-                "notebook",
-                "calculator",
-                "knife",
-                "knife_like",
-                "concealed_paper",
-                "beaker",
-                "test_tube",
-                "burner",
-                "backpack",
-                "pouch",
                 "device",
+                "bench",
             ),
-            default_priority=("phone", "knife", "knife_like"),
-            default_risky=("knife", "knife_like", "concealed_paper"),
+            default_priority=("phone", "laptop", "tablet", "device"),
+            default_risky=(),
             default_label_map={},
         )
         self.object_allowlist = allowlist

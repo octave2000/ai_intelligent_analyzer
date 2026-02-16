@@ -63,24 +63,30 @@ def create_app() -> FastAPI:
         snapshot_all=settings.overlay_snapshot_all,
         snapshot_min_interval_seconds=settings.overlay_snapshot_min_interval_seconds,
     )
-    face_identifier = FaceIdentifier(
-        roster_path=settings.roster_path,
-        similarity_threshold=settings.face_similarity_threshold,
-        det_min_score=settings.face_det_min_score,
-        enhance_enable=settings.face_enhance_enable,
-        enhance_gamma=settings.face_enhance_gamma,
-        enhance_clahe=settings.face_enhance_clahe,
-        enhance_denoise=settings.face_enhance_denoise,
-        enhance_sharpen=settings.face_enhance_sharpen,
-        enhance_upscale_enable=settings.face_enhance_upscale_enable,
-        enhance_upscale_min_dim=settings.face_enhance_upscale_min_dim,
-        enhance_upscale_max_dim=settings.face_enhance_upscale_max_dim,
-        model_name=settings.face_model_name,
-        model_root=settings.face_model_root,
-        ctx_id=settings.face_ctx_id,
-    )
+    face_identifier = None
+    if settings.face_recognition_enabled:
+        face_identifier = FaceIdentifier(
+            roster_path=settings.roster_path,
+            similarity_threshold=settings.face_similarity_threshold,
+            det_min_score=settings.face_det_min_score,
+            enhance_enable=settings.face_enhance_enable,
+            enhance_gamma=settings.face_enhance_gamma,
+            enhance_clahe=settings.face_enhance_clahe,
+            enhance_denoise=settings.face_enhance_denoise,
+            enhance_sharpen=settings.face_enhance_sharpen,
+            enhance_upscale_enable=settings.face_enhance_upscale_enable,
+            enhance_upscale_min_dim=settings.face_enhance_upscale_min_dim,
+            enhance_upscale_max_dim=settings.face_enhance_upscale_max_dim,
+            model_name=settings.face_model_name,
+            model_root=settings.face_model_root,
+            ctx_id=settings.face_ctx_id,
+        )
     yolo_detector_1 = _build_yolo_detector(settings.yolo_model_path)
     logger = logging.getLogger(__name__)
+    logger.info(
+        "face_identifier enabled=%s",
+        face_identifier is not None,
+    )
     logger.info(
         "yolo_detector.pipeline pipeline=p1 enabled=%s model_path=%s",
         yolo_detector_1 is not None,
@@ -100,6 +106,23 @@ def create_app() -> FastAPI:
         uniform_hsv_low=settings.perception_uniform_hsv_low,
         uniform_hsv_high=settings.perception_uniform_hsv_high,
         uniform_min_ratio=settings.perception_uniform_min_ratio,
+        student_top_hsv_low=settings.perception_student_top_hsv_low,
+        student_top_hsv_high=settings.perception_student_top_hsv_high,
+        student_bottom_hsv_low=settings.perception_student_bottom_hsv_low,
+        student_bottom_hsv_high=settings.perception_student_bottom_hsv_high,
+        student_bottom_hsv_low_2=settings.perception_student_bottom_hsv_low_2,
+        student_bottom_hsv_high_2=settings.perception_student_bottom_hsv_high_2,
+        student_top_min_ratio=settings.perception_student_top_min_ratio,
+        student_bottom_min_ratio=settings.perception_student_bottom_min_ratio,
+        student_top_only_min_ratio=settings.perception_student_top_only_min_ratio,
+        student_top_only_max_bottom_ratio=(
+            settings.perception_student_top_only_max_bottom_ratio
+        ),
+        student_seated_max_height_ratio=(
+            settings.perception_student_seated_max_height_ratio
+        ),
+        teacher_min_hits=settings.perception_teacher_min_hits,
+        role_decision_margin=settings.perception_role_decision_margin,
         teacher_height_ratio=settings.perception_teacher_height_ratio,
         orientation_motion_threshold=settings.perception_orientation_motion_threshold,
         body_movement_enabled=settings.perception_body_movement_enabled,

@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import queue
 import threading
 import time
 from collections import deque
@@ -63,6 +64,10 @@ class OverlayStore:
         self._lock = threading.Lock()
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
+        self._snapshot_thread: Optional[threading.Thread] = None
+        self._snapshot_write_queue: "queue.Queue[Optional[Tuple[str, str, int, SnapshotBuffer]]]" = queue.Queue(
+            maxsize=256
+        )
         self._person_conf_threshold = max(0.0, min(1.0, person_conf_threshold))
         self._object_conf_threshold = max(0.0, min(1.0, object_conf_threshold))
         self._last_cleanup = 0.0
@@ -74,12 +79,22 @@ class OverlayStore:
         self._stop_event.clear()
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
+        if self.snapshot_enabled and (self._snapshot_thread is None or not self._snapshot_thread.is_alive()):
+            self._snapshot_thread = threading.Thread(
+                target=self._run_snapshot_writer,
+                daemon=True,
+            )
+            self._snapshot_thread.start()
 
     def stop(self) -> None:
         self._stop_event.set()
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=2.0)
         self._flush_all()
+        if self.snapshot_enabled and self._snapshot_thread and self._snapshot_thread.is_alive():
+            self._snapshot_write_queue.join()
+            self._snapshot_write_queue.put(None)
+            self._snapshot_thread.join(timeout=2.0)
 
     def add_event(
         self,
@@ -139,7 +154,7 @@ class OverlayStore:
         for room_id, camera_id, events in items:
             self._write_events(room_id, camera_id, events)
         for room_id, camera_id, ts, buf in snapshot_items:
-            self._write_snapshot_batch(room_id, camera_id, ts, buf)
+            self._enqueue_snapshot_batch(room_id, camera_id, ts, buf, blocking=True)
 
     def _write_events(self, room_id: str, camera_id: str, events: list) -> None:
         dir_path = os.path.join(self.root_path, room_id, camera_id)
@@ -208,18 +223,20 @@ class OverlayStore:
         event_type = event.get("event_type")
         if not isinstance(event_type, str):
             event_type = None
-        try:
-            image = frame.copy()
-        except Exception:
-            return
+        now = time.time()
+        event_copy = event.copy()
         with self._lock:
             room = self._snapshot_buffers.setdefault(room_id, {})
             camera = room.setdefault(camera_id, {})
             buf = camera.get(ts)
             if buf is None:
+                try:
+                    image = frame.copy()
+                except Exception:
+                    return
                 camera[ts] = SnapshotBuffer(
                     frame=image,
-                    last_update=time.time(),
+                    last_update=now,
                     event_timestamp=event_timestamp,
                     frame_source_timestamp=frame_source_timestamp,
                     timestamp_offset_seconds=timestamp_offset_seconds,
@@ -228,14 +245,13 @@ class OverlayStore:
                     frame_transport_delay_seconds=frame_transport_delay_seconds,
                     event_type=event_type,
                     event_count=1,
-                    events=[event.copy()],
+                    events=[event_copy],
                 )
             else:
-                buf.frame = image
-                buf.last_update = time.time()
+                buf.last_update = now
                 buf.event_count += 1
                 if len(buf.events) < 200:
-                    buf.events.append(event.copy())
+                    buf.events.append(event_copy)
                 if event_timestamp is not None:
                     buf.event_timestamp = event_timestamp
                 if frame_source_timestamp is not None:
@@ -258,7 +274,43 @@ class OverlayStore:
         with self._lock:
             items = self._collect_snapshot_items_locked(now=now)
         for room_id, camera_id, ts, buf in items:
+            self._enqueue_snapshot_batch(room_id, camera_id, ts, buf)
+
+    def _enqueue_snapshot_batch(
+        self,
+        room_id: str,
+        camera_id: str,
+        ts: int,
+        buf: SnapshotBuffer,
+        blocking: bool = False,
+    ) -> None:
+        if self._snapshot_thread is None or not self._snapshot_thread.is_alive():
             self._write_snapshot_batch(room_id, camera_id, ts, buf)
+            return
+        item = (room_id, camera_id, ts, buf)
+        try:
+            if blocking:
+                self._snapshot_write_queue.put(item, timeout=1.0)
+            else:
+                self._snapshot_write_queue.put_nowait(item)
+        except queue.Full:
+            logger.warning(
+                "overlay_store.snapshot_drop room_id=%s camera_id=%s ts=%s reason=snapshot_queue_full",
+                room_id,
+                camera_id,
+                ts,
+            )
+
+    def _run_snapshot_writer(self) -> None:
+        while True:
+            item = self._snapshot_write_queue.get()
+            try:
+                if item is None:
+                    return
+                room_id, camera_id, ts, buf = item
+                self._write_snapshot_batch(room_id, camera_id, ts, buf)
+            finally:
+                self._snapshot_write_queue.task_done()
 
     def _collect_snapshot_items_locked(
         self,
@@ -301,30 +353,6 @@ class OverlayStore:
             cv2.imwrite(path, image)
         except Exception:
             return
-        write_ts = time.time()
-        event_timestamp = buf.event_timestamp if buf.event_timestamp is not None else float(ts)
-        emitted_at = buf.emitted_at
-        sidecar = {
-            "snapshot_type": "event_snapshot",
-            "room_id": room_id,
-            "camera_id": camera_id,
-            "image_file": filename,
-            "event_timestamp": event_timestamp,
-            "frame_source_timestamp": buf.frame_source_timestamp,
-            "timestamp_offset_seconds": buf.timestamp_offset_seconds,
-            "emitted_at": emitted_at,
-            "write_time": write_ts,
-            "frame_age_seconds": buf.frame_age_seconds,
-            "frame_transport_delay_seconds": buf.frame_transport_delay_seconds,
-            "event_type": buf.event_type,
-            "event_count": buf.event_count,
-            "drawn_event_count": len(buf.events),
-        }
-        if emitted_at is not None:
-            sidecar["event_pipeline_lag_seconds"] = max(0.0, emitted_at - event_timestamp)
-        sidecar["snapshot_lag_seconds"] = max(0.0, write_ts - event_timestamp)
-        sidecar_path = os.path.join(dir_path, f"{ts}.json")
-        self._write_sidecar(sidecar_path, sidecar)
 
     def add_snapshot_all(
         self,
@@ -354,21 +382,6 @@ class OverlayStore:
             cv2.imwrite(path, image)
         except Exception:
             return
-        write_ts = time.time()
-        sidecar = {
-            "snapshot_type": "all_snapshot",
-            "room_id": room_id,
-            "camera_id": camera_id,
-            "image_file": filename,
-            "event_timestamp": event_ts,
-            "emitted_at": write_ts,
-            "write_time": write_ts,
-            "snapshot_lag_seconds": max(0.0, write_ts - event_ts),
-        }
-        sidecar_path = os.path.join(
-            dir_path, f"{int(event_ts * 1000)}.json"
-        )
-        self._write_sidecar(sidecar_path, sidecar)
 
     def _write_sidecar(self, path: str, payload: Dict[str, object]) -> None:
         tmp_path = f"{path}.tmp"
@@ -472,15 +485,26 @@ class OverlayStore:
                     if isinstance(payload, list):
                         existing = payload
             for event in events:
-                existing.append(
-                    {
-                        "timestamp": ts,
-                        "event_type": event.get("event_type"),
-                        "global_person_id": event.get("global_person_id"),
-                        "confidence": event.get("confidence"),
-                        "file": f"{ts}.json",
-                    }
-                )
+                entry: Dict[str, object] = {
+                    "timestamp": ts,
+                    "event_type": event.get("event_type"),
+                    "global_person_id": event.get("global_person_id"),
+                    "confidence": event.get("confidence"),
+                    "file": f"{ts}.json",
+                }
+                role = event.get("role")
+                if isinstance(role, str) and role.strip():
+                    entry["role"] = role
+                role_reason = event.get("role_reason")
+                if isinstance(role_reason, str) and role_reason.strip():
+                    entry["role_reason"] = role_reason
+                person_role = event.get("person_role")
+                if isinstance(person_role, str) and person_role.strip():
+                    entry["person_role"] = person_role
+                person_id = event.get("person_id")
+                if isinstance(person_id, str) and person_id.strip():
+                    entry["person_id"] = person_id
+                existing.append(entry)
             with open(index_path, "w", encoding="utf-8") as handle:
                 json.dump(existing, handle, separators=(",", ":"))
         except Exception as exc:
