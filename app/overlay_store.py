@@ -6,7 +6,7 @@ import threading
 import time
 from collections import deque
 from dataclasses import dataclass, field
-from typing import Deque, Dict, List, Optional, Tuple
+from typing import Deque, Dict, List, Optional, Set, Tuple
 
 import cv2
 
@@ -72,6 +72,9 @@ class OverlayStore:
         self._object_conf_threshold = max(0.0, min(1.0, object_conf_threshold))
         self._last_cleanup = 0.0
         self._last_event_ts: Dict[str, Dict[str, int]] = {}
+        self._last_event_ts_known: Set[Tuple[str, str]] = set()
+        self._max_gap_fill_seconds = 600
+        self._max_idle_gap_fill_seconds = 30
 
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
@@ -129,7 +132,8 @@ class OverlayStore:
 
     def _flush_due(self) -> None:
         now = time.time()
-        to_flush = []
+        fill_until_ts = int(now) - 1
+        to_flush: List[Tuple[str, str, list, int]] = []
         with self._lock:
             for room_id, cameras in self._buffers.items():
                 for camera_id, buf in cameras.items():
@@ -138,10 +142,12 @@ class OverlayStore:
                         buf.last_flush = now
                         pending = list(buf.events)
                         if pending:
-                            to_flush.append((room_id, camera_id, pending))
                             buf.events.clear()
-        for room_id, camera_id, events in to_flush:
-            self._write_events(room_id, camera_id, events)
+                        to_flush.append((room_id, camera_id, pending, fill_until_ts))
+        for room_id, camera_id, events, fill_until in to_flush:
+            if events:
+                self._write_events(room_id, camera_id, events)
+            self._write_idle_gap(room_id, camera_id, fill_until)
 
     def _flush_all(self) -> None:
         with self._lock:
@@ -159,14 +165,17 @@ class OverlayStore:
     def _write_events(self, room_id: str, camera_id: str, events: list) -> None:
         dir_path = os.path.join(self.root_path, room_id, camera_id)
         os.makedirs(dir_path, exist_ok=True)
+        last_ts = self._ensure_last_event_ts(room_id, camera_id, dir_path)
         grouped: Dict[int, list] = {}
         for event in events:
             ts = int(_get_float(event, "timestamp"))
             grouped.setdefault(ts, []).append(event)
         if not grouped:
             return
-        for ts, bucket in grouped.items():
-            last_ts = self._last_event_ts.setdefault(room_id, {}).get(camera_id)
+        for ts in sorted(grouped.keys()):
+            bucket = grouped.get(ts, [])
+            if not bucket:
+                continue
             if last_ts is not None and ts > last_ts + 1:
                 missing = (ts - last_ts) - 1
                 logger.info(
@@ -177,31 +186,171 @@ class OverlayStore:
                     ts,
                     missing,
                 )
-            self._last_event_ts.setdefault(room_id, {})[camera_id] = ts
-            file_path = os.path.join(dir_path, f"{ts}.json")
-            tmp_path = f"{file_path}.tmp"
-            existing: list = []
-            if os.path.exists(file_path):
-                try:
-                    with open(file_path, "r", encoding="utf-8") as handle:
-                        loaded = json.load(handle)
-                    if isinstance(loaded, list):
-                        existing = loaded
-                except Exception:
-                    existing = []
-            payload = existing + bucket
-            with open(tmp_path, "w", encoding="utf-8") as handle:
-                json.dump(payload, handle, separators=(",", ":"))
-            os.replace(tmp_path, file_path)
-            self._append_index(dir_path, ts, bucket)
+                fill_count = min(missing, self._max_gap_fill_seconds)
+                if fill_count < missing:
+                    logger.warning(
+                        "overlay_store.missing_seconds_truncated room_id=%s camera_id=%s missing=%s fill_count=%s max_fill=%s",
+                        room_id,
+                        camera_id,
+                        missing,
+                        fill_count,
+                        self._max_gap_fill_seconds,
+                    )
+                for miss_ts in range(last_ts + 1, last_ts + 1 + fill_count):
+                    filler = self._gap_filler_event(
+                        room_id=room_id,
+                        camera_id=camera_id,
+                        ts=miss_ts,
+                        last_ts=miss_ts - 1,
+                        next_ts=ts,
+                    )
+                    self._write_bucket(dir_path, room_id, camera_id, miss_ts, [filler], is_backfill=True)
+            self._write_bucket(dir_path, room_id, camera_id, ts, bucket, is_backfill=False)
+            last_ts = ts
+
+    def _write_idle_gap(self, room_id: str, camera_id: str, fill_until_ts: int) -> None:
+        if fill_until_ts < 0:
+            return
+        dir_path = os.path.join(self.root_path, room_id, camera_id)
+        os.makedirs(dir_path, exist_ok=True)
+        last_ts = self._ensure_last_event_ts(room_id, camera_id, dir_path)
+        if last_ts is None or fill_until_ts <= last_ts:
+            return
+        missing = fill_until_ts - last_ts
+        if missing > self._max_idle_gap_fill_seconds:
             logger.info(
-                "overlay_store.flush room_id=%s camera_id=%s ts=%s events=%d path=%s",
+                "overlay_store.idle_gap_skip room_id=%s camera_id=%s missing=%s max_idle_fill=%s",
                 room_id,
                 camera_id,
-                ts,
-                len(bucket),
-                file_path,
+                missing,
+                self._max_idle_gap_fill_seconds,
             )
+            return
+        fill_count = missing
+        logger.info(
+            "overlay_store.idle_gap_fill room_id=%s camera_id=%s last_ts=%s fill_until=%s fill_count=%s",
+            room_id,
+            camera_id,
+            last_ts,
+            fill_until_ts,
+            fill_count,
+        )
+        for miss_ts in range(last_ts + 1, last_ts + 1 + fill_count):
+            filler = self._gap_filler_event(
+                room_id=room_id,
+                camera_id=camera_id,
+                ts=miss_ts,
+                last_ts=miss_ts - 1,
+                next_ts=None,
+                reason="missing_second_idle_fill",
+                trigger="flush_due",
+            )
+            self._write_bucket(dir_path, room_id, camera_id, miss_ts, [filler], is_backfill=True)
+
+    def _ensure_last_event_ts(
+        self,
+        room_id: str,
+        camera_id: str,
+        dir_path: str,
+    ) -> Optional[int]:
+        key = (room_id, camera_id)
+        room = self._last_event_ts.setdefault(room_id, {})
+        if key in self._last_event_ts_known:
+            return room.get(camera_id)
+        self._last_event_ts_known.add(key)
+        last_ts = self._probe_latest_timestamp(dir_path)
+        if last_ts is not None:
+            room[camera_id] = last_ts
+            logger.info(
+                "overlay_store.resume_last_ts room_id=%s camera_id=%s ts=%s",
+                room_id,
+                camera_id,
+                last_ts,
+            )
+        return last_ts
+
+    @staticmethod
+    def _probe_latest_timestamp(dir_path: str) -> Optional[int]:
+        if not os.path.isdir(dir_path):
+            return None
+        latest: Optional[int] = None
+        try:
+            with os.scandir(dir_path) as entries:
+                for entry in entries:
+                    if not entry.is_file() or not entry.name.endswith(".json"):
+                        continue
+                    name = entry.name[:-len(".json")]
+                    if not name.isdigit():
+                        continue
+                    ts = int(name)
+                    if latest is None or ts > latest:
+                        latest = ts
+        except OSError:
+            return None
+        return latest
+
+    def _write_bucket(
+        self,
+        dir_path: str,
+        room_id: str,
+        camera_id: str,
+        ts: int,
+        bucket: list,
+        is_backfill: bool = False,
+    ) -> None:
+        self._last_event_ts.setdefault(room_id, {})[camera_id] = ts
+        file_path = os.path.join(dir_path, f"{ts}.json")
+        tmp_path = f"{file_path}.tmp"
+        existing: list = []
+        if os.path.exists(file_path):
+            try:
+                with open(file_path, "r", encoding="utf-8") as handle:
+                    loaded = json.load(handle)
+                if isinstance(loaded, list):
+                    existing = loaded
+            except Exception:
+                existing = []
+        payload = existing + bucket
+        with open(tmp_path, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, separators=(",", ":"))
+        os.replace(tmp_path, file_path)
+        self._append_index(dir_path, ts, bucket)
+        logger.info(
+            "overlay_store.flush room_id=%s camera_id=%s ts=%s events=%d path=%s backfill=%s",
+            room_id,
+            camera_id,
+            ts,
+            len(bucket),
+            file_path,
+            is_backfill,
+        )
+
+    @staticmethod
+    def _gap_filler_event(
+        room_id: str,
+        camera_id: str,
+        ts: int,
+        last_ts: int,
+        next_ts: Optional[int],
+        reason: str = "missing_second_backfill",
+        trigger: str = "next_event",
+    ) -> Dict[str, object]:
+        payload: Dict[str, object] = {
+            "timestamp": float(ts),
+            "room_id": room_id,
+            "camera_id": camera_id,
+            "global_person_id": None,
+            "person_id": None,
+            "event_type": "frame_skipped",
+            "confidence": 0.0,
+            "skip_reason": reason,
+            "backfill_trigger": trigger,
+            "backfill": True,
+            "backfill_last_timestamp": last_ts,
+        }
+        if next_ts is not None:
+            payload["backfill_next_timestamp"] = next_ts
+        return payload
 
     def _buffer_snapshot(
         self,

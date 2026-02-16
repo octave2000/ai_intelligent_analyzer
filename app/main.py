@@ -162,6 +162,12 @@ def create_app() -> FastAPI:
         ),
         event_timestamp_round_seconds=settings.event_timestamp_round_seconds,
         dual_detect_test=settings.perception_dual_detect_test,
+        people_detector_mode=settings.perception_people_detector_mode,
+        yolo_workers=settings.perception_yolo_workers,
+        yolo_submit_interval_seconds=(
+            settings.perception_yolo_submit_interval_seconds
+        ),
+        yolo_cache_ttl_seconds=settings.perception_yolo_cache_ttl_seconds,
         pipeline_tag="p1",
         face_identifier=face_identifier,
         attendance=attendance,

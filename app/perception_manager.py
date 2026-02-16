@@ -106,8 +106,14 @@ class CameraPerceptionState:
     last_processing_ms: float = 0.0
     last_error: Optional[str] = None
     last_skip_event_at: float = 0.0
+    last_inflight_tick_at: float = 0.0
     last_face_infer_at: float = 0.0
     in_flight: bool = False
+    yolo_cached: List[YoloDetection] = field(default_factory=list)
+    yolo_cached_at: float = 0.0
+    yolo_in_flight: bool = False
+    last_yolo_submit_at: float = 0.0
+    last_yolo_inference_ms: float = 0.0
 
 
 class GlobalIdentityResolver:
@@ -218,6 +224,10 @@ class PerceptionManager:
         event_timestamp_stabilize_max_correction_seconds: float,
         event_timestamp_round_seconds: float,
         dual_detect_test: bool,
+        people_detector_mode: str = "auto",
+        yolo_workers: int = 1,
+        yolo_submit_interval_seconds: float = 0.8,
+        yolo_cache_ttl_seconds: float = 0.0,
         pipeline_tag: str = "p1",
         face_identifier: Optional[FaceIdentifier] = None,
         attendance: Optional[AttendanceManager] = None,
@@ -301,6 +311,16 @@ class PerceptionManager:
         )
         self.event_timestamp_round_seconds = max(0.0, event_timestamp_round_seconds)
         self.dual_detect_test = dual_detect_test
+        detector_mode = people_detector_mode.strip().lower()
+        if detector_mode not in ("auto", "yolo_only", "hog_only"):
+            detector_mode = "auto"
+        self.people_detector_mode = detector_mode
+        self.yolo_workers = max(1, yolo_workers)
+        self.yolo_submit_interval_seconds = max(0.05, yolo_submit_interval_seconds)
+        if yolo_cache_ttl_seconds <= 0.0:
+            self.yolo_cache_ttl_seconds = max(1.0, self.active_interval_seconds * 8.0)
+        else:
+            self.yolo_cache_ttl_seconds = max(0.5, yolo_cache_ttl_seconds)
         self.pipeline_tag = pipeline_tag
         self.face_identifier = face_identifier
         self.attendance = attendance
@@ -329,6 +349,9 @@ class PerceptionManager:
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._process_pool: Optional[ThreadPoolExecutor] = None
+        self._yolo_pool: Optional[ThreadPoolExecutor] = None
+        self._yolo_submit_interval_seconds = self.yolo_submit_interval_seconds
+        self._yolo_cache_ttl_seconds = self.yolo_cache_ttl_seconds
         self._events: Deque[Dict[str, object]] = deque(maxlen=self.event_queue_maxlen)
         self._events_lock = threading.Lock()
         self._resolver = GlobalIdentityResolver(
@@ -354,6 +377,11 @@ class PerceptionManager:
                 max_workers=self.max_cameras_per_tick,
                 thread_name_prefix="perception-worker",
             )
+        if self._yolo_pool is None and self.yolo_detector is not None and self.yolo_detector.ready():
+            self._yolo_pool = ThreadPoolExecutor(
+                max_workers=self.yolo_workers,
+                thread_name_prefix="perception-yolo",
+            )
         self._stop_event.clear()
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
@@ -366,6 +394,10 @@ class PerceptionManager:
         self._process_pool = None
         if pool is not None:
             pool.shutdown(wait=True)
+        yolo_pool = self._yolo_pool
+        self._yolo_pool = None
+        if yolo_pool is not None:
+            yolo_pool.shutdown(wait=True)
 
     def bootstrap_from_stream_manager(self) -> None:
         entries = self.stream_manager.list_camera_entries()
@@ -514,6 +546,42 @@ class PerceptionManager:
             payload.update(extra)
         self._emit(payload)
 
+    def _emit_inflight_tick(
+        self,
+        state: CameraPerceptionState,
+        in_flight_seconds: float,
+    ) -> None:
+        now = time.time()
+        with state.lock:
+            if now - state.last_inflight_tick_at < 1.0:
+                return
+            state.last_inflight_tick_at = now
+            detections_count = len(state.tracks)
+            objects_count = len(state.object_tracks)
+            last_processing_ms = state.last_processing_ms
+            last_frame_timestamp = state.last_frame_timestamp
+            last_frame_age_seconds = state.last_frame_age_seconds
+        payload: Dict[str, object] = {
+            "timestamp": now,
+            "room_id": state.room_id,
+            "camera_id": state.camera_id,
+            "global_person_id": None,
+            "person_id": None,
+            "event_type": "frame_tick",
+            "confidence": 1.0,
+            "detections_count": detections_count,
+            "objects_count": objects_count,
+            "processing_in_flight": True,
+            "in_flight_seconds": round(in_flight_seconds, 3),
+            "last_processing_ms": round(last_processing_ms, 2),
+            "person_detection_source": "cached_tracks",
+        }
+        if last_frame_timestamp is not None:
+            payload["frame_timestamp"] = last_frame_timestamp
+        if last_frame_age_seconds is not None:
+            payload["frame_age_seconds"] = last_frame_age_seconds
+        self._emit(payload)
+
     def emit_external_event(
         self,
         event: Dict[str, object],
@@ -568,23 +636,30 @@ class PerceptionManager:
                 if state is None:
                     continue
                 interval = self.active_interval_seconds
+                in_flight_for = 0.0
                 with state.lock:
                     if state.in_flight:
+                        base_attempt = state.last_attempt_at if state.last_attempt_at > 0.0 else state.last_run
+                        in_flight_for = max(0.0, now - base_attempt)
                         logger.debug(
                             "perception.skip room_id=%s camera_id=%s reason=in_flight",
                             room_id,
                             camera_id,
                         )
-                        continue
-                    if now - state.last_run < interval:
+                    elif now - state.last_run < interval:
                         logger.info(
                             "perception.skip room_id=%s camera_id=%s reason=interval_throttle",
                             room_id,
                             camera_id,
                         )
                         continue
-                    state.last_run = now
-                    state.in_flight = True
+                    else:
+                        state.last_run = now
+                        state.in_flight = True
+                if in_flight_for > 0.0:
+                    if in_flight_for >= 1.0:
+                        self._emit_inflight_tick(state, in_flight_for)
+                    continue
                 logger.debug(
                     "perception.process_dispatch room_id=%s camera_id=%s",
                     room_id,
@@ -630,6 +705,72 @@ class PerceptionManager:
         finally:
             with state.lock:
                 state.in_flight = False
+
+    def _submit_yolo_if_due(
+        self,
+        state: CameraPerceptionState,
+        frame: "cv2.typing.MatLike",
+    ) -> None:
+        detector = self.yolo_detector
+        if detector is None or not detector.ready():
+            return
+        now = time.monotonic()
+        with state.lock:
+            if state.yolo_in_flight:
+                return
+            if now - state.last_yolo_submit_at < self._yolo_submit_interval_seconds:
+                return
+            try:
+                frame_copy = frame.copy()
+            except Exception:
+                return
+            state.yolo_in_flight = True
+            state.last_yolo_submit_at = now
+        pool = self._yolo_pool
+        if pool is None:
+            self._run_yolo_task(state, frame_copy)
+            return
+        try:
+            pool.submit(self._run_yolo_task, state, frame_copy)
+        except RuntimeError:
+            with state.lock:
+                state.yolo_in_flight = False
+
+    def _run_yolo_task(
+        self,
+        state: CameraPerceptionState,
+        frame: "cv2.typing.MatLike",
+    ) -> None:
+        detector = self.yolo_detector
+        if detector is None or not detector.ready():
+            with state.lock:
+                state.yolo_in_flight = False
+            return
+        start = time.perf_counter()
+        detections: List[YoloDetection] = []
+        try:
+            detections = detector.detect(frame)
+        except Exception:
+            detections = []
+        elapsed_ms = (time.perf_counter() - start) * 1000.0
+        with state.lock:
+            state.yolo_cached = detections
+            state.yolo_cached_at = time.monotonic()
+            state.last_yolo_inference_ms = elapsed_ms
+            state.yolo_in_flight = False
+
+    def _get_cached_yolo(
+        self,
+        state: CameraPerceptionState,
+    ) -> Tuple[List[YoloDetection], Optional[float], float]:
+        now = time.monotonic()
+        with state.lock:
+            if not state.yolo_cached:
+                return [], None, state.last_yolo_inference_ms
+            age = max(0.0, now - state.yolo_cached_at)
+            if age > self._yolo_cache_ttl_seconds:
+                return [], age, state.last_yolo_inference_ms
+            return list(state.yolo_cached), age, state.last_yolo_inference_ms
 
     def _process_camera(self, state: CameraPerceptionState) -> None:
         start = time.time()
@@ -732,21 +873,44 @@ class PerceptionManager:
             )
 
             detect_start = time.perf_counter()
-            yolo_detections: Optional[List[YoloDetection]] = None
-            if self.yolo_detector is not None and self.yolo_detector.ready():
-                try:
-                    yolo_detections = self.yolo_detector.detect(frame)
-                except Exception:
-                    yolo_detections = []
-            detections = self._detect_people(frame, yolo_detections=yolo_detections)
+            yolo_cache_age_seconds: Optional[float] = None
+            yolo_last_inference_ms = 0.0
+            yolo_detections: List[YoloDetection] = []
+            person_detection_source = "none"
+            yolo_ready = self.yolo_detector is not None and self.yolo_detector.ready()
+            if self.people_detector_mode == "hog_only":
+                detections = self._detect_people_hog(frame)
+                person_detection_source = "hog_only"
+            elif yolo_ready:
+                self._submit_yolo_if_due(state, frame)
+                yolo_detections, yolo_cache_age_seconds, yolo_last_inference_ms = (
+                    self._get_cached_yolo(state)
+                )
+                if yolo_detections:
+                    detections = self._detect_people(
+                        frame,
+                        yolo_detections=yolo_detections,
+                    )
+                    person_detection_source = "yolo_cache"
+                else:
+                    detections = []
+                    person_detection_source = "yolo_pending"
+            elif self.people_detector_mode == "yolo_only":
+                detections = []
+                person_detection_source = "yolo_unavailable"
+            else:
+                detections = self._detect_people_hog(frame)
+                person_detection_source = "hog"
             secondary_people: Optional[List[Detection]] = None
             if self.dual_detect_test:
-                if self.yolo_detector is not None and self.yolo_detector.ready():
+                if self.people_detector_mode == "yolo_only":
+                    secondary_people = []
+                elif yolo_ready:
                     secondary_people = self._detect_people_hog(frame)
                 else:
                     secondary_people = (
                         self._detect_people_yolo(frame, yolo_detections=yolo_detections)
-                        if self.yolo_detector is not None
+                        if self.yolo_detector is not None and self.yolo_detector.ready()
                         else []
                     )
             logger.debug(
@@ -767,7 +931,10 @@ class PerceptionManager:
             track_start = time.perf_counter()
             with state.lock:
                 self._update_tracks(state, frame, detections, faces)
-                objects = self._detect_objects(frame, yolo_detections=yolo_detections)
+                objects = self._detect_objects(
+                    frame,
+                    yolo_detections=yolo_detections,
+                )
                 logger.debug(
                     "perception.detect_objects room_id=%s camera_id=%s count=%d",
                     state.room_id,
@@ -800,6 +967,19 @@ class PerceptionManager:
                                 (time.perf_counter() - track_start) * 1000.0,
                                 2,
                             ),
+                            "yolo_cached_count": len(yolo_detections),
+                            "yolo_cache_age_seconds": (
+                                round(yolo_cache_age_seconds, 3)
+                                if yolo_cache_age_seconds is not None
+                                else None
+                            ),
+                            "yolo_last_inference_ms": round(
+                                yolo_last_inference_ms,
+                                2,
+                            ),
+                            "person_detection_source": person_detection_source,
+                            "people_detector_mode": self.people_detector_mode,
+                            "yolo_ready": yolo_ready,
                             "processing_elapsed_ms": round(
                                 (time.perf_counter() - perf_start) * 1000.0,
                                 2,

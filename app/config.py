@@ -233,6 +233,10 @@ class Settings:
     perception_exam_mode: bool
     perception_max_cameras_per_tick: int
     perception_dual_detect_test: bool
+    perception_people_detector_mode: str
+    perception_yolo_workers: int
+    perception_yolo_submit_interval_seconds: float
+    perception_yolo_cache_ttl_seconds: float
     event_timestamp_offset_seconds: float
     event_timestamp_stabilize_alpha: float
     event_timestamp_stabilize_max_correction_seconds: float
@@ -487,6 +491,24 @@ class Settings:
         )
         self.perception_dual_detect_test = _get_bool(
             "PERCEPTION_DUAL_DETECT_TEST", False
+        )
+        detector_mode = os.getenv(
+            "PERCEPTION_PEOPLE_DETECTOR_MODE", "auto"
+        ).strip().lower()
+        if detector_mode not in ("auto", "yolo_only", "hog_only"):
+            detector_mode = "auto"
+        self.perception_people_detector_mode = detector_mode
+        self.perception_yolo_workers = max(
+            1,
+            _get_int("PERCEPTION_YOLO_WORKERS", 2),
+        )
+        self.perception_yolo_submit_interval_seconds = max(
+            0.05,
+            _get_float("PERCEPTION_YOLO_SUBMIT_INTERVAL_SECONDS", 0.25),
+        )
+        self.perception_yolo_cache_ttl_seconds = max(
+            0.5,
+            _get_float("PERCEPTION_YOLO_CACHE_TTL_SECONDS", 3.0),
         )
         self.mode_config_path = "data/modes.json"
         self.perception_exam_mode = _load_mode_config(
