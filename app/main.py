@@ -60,6 +60,8 @@ def create_app() -> FastAPI:
         cleanup_interval_seconds=settings.overlay_cleanup_interval_seconds,
         snapshot_enabled=settings.overlay_snapshot_enabled,
         snapshot_path=settings.overlay_snapshot_path,
+        snapshot_raw_enabled=settings.overlay_snapshot_raw_enabled,
+        snapshot_raw_path=settings.overlay_snapshot_raw_path,
         snapshot_all=settings.overlay_snapshot_all,
         snapshot_min_interval_seconds=settings.overlay_snapshot_min_interval_seconds,
     )

@@ -273,6 +273,8 @@ class Settings:
     overlay_cleanup_interval_seconds: float
     overlay_snapshot_enabled: bool
     overlay_snapshot_path: str
+    overlay_snapshot_raw_enabled: bool
+    overlay_snapshot_raw_path: str
     overlay_path_2: str
     overlay_path_3: str
     overlay_snapshot_path_2: str
@@ -567,6 +569,12 @@ class Settings:
         )
         self.overlay_snapshot_path = os.getenv(
             "OVERLAY_SNAPSHOT_PATH", "data/overlay_snapshots"
+        )
+        self.overlay_snapshot_raw_enabled = _get_bool(
+            "OVERLAY_SNAPSHOT_RAW_ENABLED", False
+        )
+        self.overlay_snapshot_raw_path = os.getenv(
+            "OVERLAY_SNAPSHOT_RAW_PATH", "data/overlay_snapshots_raw"
         )
         self.overlay_path_2 = os.getenv("OVERLAY_PATH_2", "data/overlay_2")
         self.overlay_path_3 = os.getenv("OVERLAY_PATH_3", "data/overlay_3")

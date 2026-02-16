@@ -46,6 +46,8 @@ class OverlayStore:
         cleanup_interval_seconds: float = 60.0,
         snapshot_enabled: bool = False,
         snapshot_path: str = "data/overlay_snapshots",
+        snapshot_raw_enabled: bool = False,
+        snapshot_raw_path: str = "data/overlay_snapshots_raw",
         snapshot_all: bool = False,
         snapshot_min_interval_seconds: float = 1.0,
     ) -> None:
@@ -56,6 +58,8 @@ class OverlayStore:
         self.cleanup_interval_seconds = max(5.0, cleanup_interval_seconds)
         self.snapshot_enabled = snapshot_enabled
         self.snapshot_path = snapshot_path
+        self.snapshot_raw_enabled = snapshot_raw_enabled
+        self.snapshot_raw_path = snapshot_raw_path
         self.snapshot_all = snapshot_all
         self.snapshot_min_interval_seconds = max(0.1, snapshot_min_interval_seconds)
         self._last_snapshot_all: Dict[str, Dict[str, float]] = {}
@@ -490,9 +494,10 @@ class OverlayStore:
         buf: SnapshotBuffer,
     ) -> None:
         try:
-            image = buf.frame.copy()
+            raw_image = buf.frame.copy()
         except Exception:
             return
+        image = raw_image.copy()
         self._draw_snapshot_events(image, buf.events)
         dir_path = os.path.join(self.snapshot_path, room_id, camera_id)
         os.makedirs(dir_path, exist_ok=True)
@@ -502,6 +507,14 @@ class OverlayStore:
             cv2.imwrite(path, image)
         except Exception:
             return
+        if self.snapshot_raw_enabled:
+            raw_dir_path = os.path.join(self.snapshot_raw_path, room_id, camera_id)
+            os.makedirs(raw_dir_path, exist_ok=True)
+            raw_path = os.path.join(raw_dir_path, filename)
+            try:
+                cv2.imwrite(raw_path, raw_image)
+            except Exception:
+                return
 
     def add_snapshot_all(
         self,
@@ -531,6 +544,14 @@ class OverlayStore:
             cv2.imwrite(path, image)
         except Exception:
             return
+        if self.snapshot_raw_enabled:
+            raw_dir_path = os.path.join(self.snapshot_raw_path, room_id, camera_id, "all")
+            os.makedirs(raw_dir_path, exist_ok=True)
+            raw_path = os.path.join(raw_dir_path, filename)
+            try:
+                cv2.imwrite(raw_path, image)
+            except Exception:
+                return
 
     def _write_sidecar(self, path: str, payload: Dict[str, object]) -> None:
         tmp_path = f"{path}.tmp"
