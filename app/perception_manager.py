@@ -3,6 +3,7 @@ import math
 import threading
 import time
 from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Deque, Dict, List, Optional, Tuple
 
@@ -55,6 +56,8 @@ class TrackState:
     upright_height_ema: float = 0.0
     down_since: float = 0.0
     bowing_since: float = 0.0
+    role_teacher_evidence: float = 0.0
+    role_student_evidence: float = 0.0
     last_sleep_emit: float = 0.0
     last_device_emit: float = 0.0
     last_phone_emit: float = 0.0
@@ -102,6 +105,9 @@ class CameraPerceptionState:
     last_processed_at: float = 0.0
     last_processing_ms: float = 0.0
     last_error: Optional[str] = None
+    last_skip_event_at: float = 0.0
+    last_face_infer_at: float = 0.0
+    in_flight: bool = False
 
 
 class GlobalIdentityResolver:
@@ -170,6 +176,19 @@ class PerceptionManager:
         uniform_hsv_low: Tuple[int, int, int],
         uniform_hsv_high: Tuple[int, int, int],
         uniform_min_ratio: float,
+        student_top_hsv_low: Tuple[int, int, int],
+        student_top_hsv_high: Tuple[int, int, int],
+        student_bottom_hsv_low: Tuple[int, int, int],
+        student_bottom_hsv_high: Tuple[int, int, int],
+        student_bottom_hsv_low_2: Tuple[int, int, int],
+        student_bottom_hsv_high_2: Tuple[int, int, int],
+        student_top_min_ratio: float,
+        student_bottom_min_ratio: float,
+        student_top_only_min_ratio: float,
+        student_top_only_max_bottom_ratio: float,
+        student_seated_max_height_ratio: float,
+        teacher_min_hits: int,
+        role_decision_margin: float,
         teacher_height_ratio: float,
         orientation_motion_threshold: float,
         body_movement_enabled: bool,
@@ -221,7 +240,26 @@ class PerceptionManager:
         self.uniform_hsv_low = uniform_hsv_low
         self.uniform_hsv_high = uniform_hsv_high
         self.uniform_min_ratio = uniform_min_ratio
-        self.teacher_height_ratio = teacher_height_ratio
+        self.student_top_hsv_low = student_top_hsv_low
+        self.student_top_hsv_high = student_top_hsv_high
+        self.student_bottom_hsv_low = student_bottom_hsv_low
+        self.student_bottom_hsv_high = student_bottom_hsv_high
+        self.student_bottom_hsv_low_2 = student_bottom_hsv_low_2
+        self.student_bottom_hsv_high_2 = student_bottom_hsv_high_2
+        self.student_top_min_ratio = max(0.01, min(1.0, student_top_min_ratio))
+        self.student_bottom_min_ratio = max(0.01, min(1.0, student_bottom_min_ratio))
+        self.student_top_only_min_ratio = max(
+            0.01, min(1.0, student_top_only_min_ratio)
+        )
+        self.student_top_only_max_bottom_ratio = max(
+            0.0, min(1.0, student_top_only_max_bottom_ratio)
+        )
+        self.student_seated_max_height_ratio = max(
+            0.05, min(1.0, student_seated_max_height_ratio)
+        )
+        self.teacher_min_hits = max(1, teacher_min_hits)
+        self.role_decision_margin = max(0.0, min(0.4, role_decision_margin))
+        self.teacher_height_ratio = max(0.05, min(1.0, teacher_height_ratio))
         self.orientation_motion_threshold = orientation_motion_threshold
         self.body_movement_enabled = body_movement_enabled
         self.body_movement_min_delta_pixels = max(0.0, body_movement_min_delta_pixels)
@@ -240,6 +278,9 @@ class PerceptionManager:
             0.0, phone_usage_emit_interval_seconds
         )
         self.identity_min_interval_seconds = max(0.05, identity_min_interval_seconds)
+        self.face_detect_interval_seconds = max(
+            0.6, self.identity_min_interval_seconds * 2.0
+        )
         self.identity_sticky_score = max(0.0, min(1.0, identity_sticky_score))
         self.proximity_distance_ratio = proximity_distance_ratio
         self.proximity_duration_seconds = proximity_duration_seconds
@@ -265,9 +306,21 @@ class PerceptionManager:
         self.attendance = attendance
         self.yolo_detector = yolo_detector
         self.overlay_store = overlay_store
-        self.object_allowlist = set(object_allowlist)
-        self.object_priority = set(object_priority)
-        self.object_risky = set(object_risky)
+        self.object_allowlist = {
+            item.strip().lower()
+            for item in object_allowlist
+            if isinstance(item, str) and item.strip()
+        }
+        self.object_priority = {
+            item.strip().lower()
+            for item in object_priority
+            if isinstance(item, str) and item.strip()
+        }
+        self.object_risky = {
+            item.strip().lower()
+            for item in object_risky
+            if isinstance(item, str) and item.strip()
+        }
         self.object_label_map = object_label_map or {}
         self.attention_manager = attention_manager
 
@@ -275,6 +328,7 @@ class PerceptionManager:
         self._lock = threading.Lock()
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
+        self._process_pool: Optional[ThreadPoolExecutor] = None
         self._events: Deque[Dict[str, object]] = deque(maxlen=self.event_queue_maxlen)
         self._events_lock = threading.Lock()
         self._resolver = GlobalIdentityResolver(
@@ -295,6 +349,11 @@ class PerceptionManager:
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
             return
+        if self._process_pool is None:
+            self._process_pool = ThreadPoolExecutor(
+                max_workers=self.max_cameras_per_tick,
+                thread_name_prefix="perception-worker",
+            )
         self._stop_event.clear()
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
@@ -303,6 +362,10 @@ class PerceptionManager:
         self._stop_event.set()
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=2.0)
+        pool = self._process_pool
+        self._process_pool = None
+        if pool is not None:
+            pool.shutdown(wait=True)
 
     def bootstrap_from_stream_manager(self) -> None:
         entries = self.stream_manager.list_camera_entries()
@@ -425,6 +488,32 @@ class PerceptionManager:
             if isinstance(room_id, str) and isinstance(camera_id, str):
                 self.overlay_store.add_event(room_id, camera_id, event, frame=frame)
 
+    def _emit_frame_skipped(
+        self,
+        state: CameraPerceptionState,
+        reason: str,
+        confidence: float = 0.35,
+        extra: Optional[Dict[str, object]] = None,
+    ) -> None:
+        now = time.time()
+        with state.lock:
+            if now - state.last_skip_event_at < 1.0:
+                return
+            state.last_skip_event_at = now
+        payload: Dict[str, object] = {
+            "timestamp": now,
+            "room_id": state.room_id,
+            "camera_id": state.camera_id,
+            "global_person_id": None,
+            "person_id": None,
+            "event_type": "frame_skipped",
+            "confidence": float(max(0.0, min(1.0, confidence))),
+            "skip_reason": reason,
+        }
+        if extra:
+            payload.update(extra)
+        self._emit(payload)
+
     def emit_external_event(
         self,
         event: Dict[str, object],
@@ -466,11 +555,11 @@ class PerceptionManager:
                 start_index = self._camera_index
 
             now = time.monotonic()
-            processed = 0
+            dispatched = 0
             checked = 0
             total = len(camera_order)
             idx = start_index
-            while checked < total and processed < self.max_cameras_per_tick:
+            while checked < total and dispatched < self.max_cameras_per_tick:
                 room_id, camera_id = camera_order[idx]
                 idx = (idx + 1) % total
                 checked += 1
@@ -479,33 +568,68 @@ class PerceptionManager:
                 if state is None:
                     continue
                 interval = self.active_interval_seconds
-                if now - state.last_run < interval:
-                    logger.info(
-                        "perception.skip room_id=%s camera_id=%s reason=interval_throttle",
-                        room_id,
-                        camera_id,
-                    )
-                    continue
-                state.last_run = now
+                with state.lock:
+                    if state.in_flight:
+                        logger.debug(
+                            "perception.skip room_id=%s camera_id=%s reason=in_flight",
+                            room_id,
+                            camera_id,
+                        )
+                        continue
+                    if now - state.last_run < interval:
+                        logger.info(
+                            "perception.skip room_id=%s camera_id=%s reason=interval_throttle",
+                            room_id,
+                            camera_id,
+                        )
+                        continue
+                    state.last_run = now
+                    state.in_flight = True
                 logger.debug(
-                    "perception.process_start room_id=%s camera_id=%s",
+                    "perception.process_dispatch room_id=%s camera_id=%s",
                     room_id,
                     camera_id,
                 )
-                self._process_camera(state)
-                processed += 1
+                if not self._submit_camera(state):
+                    with state.lock:
+                        state.in_flight = False
+                    continue
+                dispatched += 1
             with self._lock:
                 if total > 0:
                     self._camera_index = idx
-                if total > processed and processed >= self.max_cameras_per_tick:
+                if total > dispatched and dispatched >= self.max_cameras_per_tick:
                     logger.info(
-                        "perception.skip reason=camera_throttled total=%d processed=%d max_per_tick=%d",
+                        "perception.skip reason=camera_throttled total=%d dispatched=%d max_per_tick=%d",
                         total,
-                        processed,
+                        dispatched,
                         self.max_cameras_per_tick,
                     )
 
             time.sleep(0.1)
+
+    def _submit_camera(self, state: CameraPerceptionState) -> bool:
+        pool = self._process_pool
+        if pool is None:
+            self._process_camera_wrapper(state)
+            return True
+        try:
+            pool.submit(self._process_camera_wrapper, state)
+            return True
+        except RuntimeError:
+            logger.exception(
+                "perception.dispatch_failed room_id=%s camera_id=%s",
+                state.room_id,
+                state.camera_id,
+            )
+            return False
+
+    def _process_camera_wrapper(self, state: CameraPerceptionState) -> None:
+        try:
+            self._process_camera(state)
+        finally:
+            with state.lock:
+                state.in_flight = False
 
     def _process_camera(self, state: CameraPerceptionState) -> None:
         start = time.time()
@@ -523,6 +647,7 @@ class PerceptionManager:
                     state.room_id,
                     state.camera_id,
                 )
+                self._emit_frame_skipped(state, "frame_missing", confidence=0.25)
                 error = "frame_missing"
                 return
             now = time.time()
@@ -533,6 +658,15 @@ class PerceptionManager:
                     state.room_id,
                     state.camera_id,
                     frame_arrival_age_seconds,
+                )
+                self._emit_frame_skipped(
+                    state,
+                    "frame_stale",
+                    confidence=0.3,
+                    extra={
+                        "arrival_age_seconds": frame_arrival_age_seconds,
+                        "stale_seconds": self.stale_seconds,
+                    },
                 )
                 error = "frame_stale"
                 return
@@ -546,6 +680,15 @@ class PerceptionManager:
                     state.camera_id,
                     frame_arrival_age_seconds,
                     self.event_max_frame_age_seconds,
+                )
+                self._emit_frame_skipped(
+                    state,
+                    "frame_too_old",
+                    confidence=0.3,
+                    extra={
+                        "arrival_age_seconds": frame_arrival_age_seconds,
+                        "max_frame_age_seconds": self.event_max_frame_age_seconds,
+                    },
                 )
                 error = "frame_too_old"
                 return
@@ -566,12 +709,21 @@ class PerceptionManager:
                 state.last_frame_age_seconds = frame_age_seconds
                 state.last_frame_transport_delay_seconds = frame_transport_delay_seconds
 
+            perf_start = time.perf_counter()
             faces: List[FaceMatch] = []
             if self.face_identifier and self.face_identifier.ready():
-                try:
-                    faces = self.face_identifier.detect_and_identify(frame)
-                except Exception:
-                    faces = []
+                should_run_face = False
+                face_now = time.monotonic()
+                with state.lock:
+                    if face_now - state.last_face_infer_at >= self.face_detect_interval_seconds:
+                        state.last_face_infer_at = face_now
+                        should_run_face = True
+                if should_run_face:
+                    try:
+                        faces = self.face_identifier.detect_and_identify(frame)
+                    except Exception:
+                        faces = []
+            face_ms = (time.perf_counter() - perf_start) * 1000.0
             logger.debug(
                 "perception.detect_faces room_id=%s camera_id=%s faces=%d",
                 state.room_id,
@@ -579,14 +731,21 @@ class PerceptionManager:
                 len(faces),
             )
 
-            detections = self._detect_people(frame)
+            detect_start = time.perf_counter()
+            yolo_detections: Optional[List[YoloDetection]] = None
+            if self.yolo_detector is not None and self.yolo_detector.ready():
+                try:
+                    yolo_detections = self.yolo_detector.detect(frame)
+                except Exception:
+                    yolo_detections = []
+            detections = self._detect_people(frame, yolo_detections=yolo_detections)
             secondary_people: Optional[List[Detection]] = None
             if self.dual_detect_test:
                 if self.yolo_detector is not None and self.yolo_detector.ready():
                     secondary_people = self._detect_people_hog(frame)
                 else:
                     secondary_people = (
-                        self._detect_people_yolo(frame)
+                        self._detect_people_yolo(frame, yolo_detections=yolo_detections)
                         if self.yolo_detector is not None
                         else []
                     )
@@ -596,6 +755,7 @@ class PerceptionManager:
                 state.camera_id,
                 len(detections),
             )
+            detect_ms = (time.perf_counter() - detect_start) * 1000.0
             if secondary_people is not None:
                 logger.info(
                     "perception.dual_detect room_id=%s camera_id=%s primary=%d secondary=%d",
@@ -604,9 +764,10 @@ class PerceptionManager:
                     len(detections),
                     len(secondary_people),
                 )
+            track_start = time.perf_counter()
             with state.lock:
                 self._update_tracks(state, frame, detections, faces)
-                objects = self._detect_objects(frame)
+                objects = self._detect_objects(frame, yolo_detections=yolo_detections)
                 logger.debug(
                     "perception.detect_objects room_id=%s camera_id=%s count=%d",
                     state.room_id,
@@ -633,6 +794,16 @@ class PerceptionManager:
                             "frame_timestamp": event_ts,
                             "detections_count": len(detections),
                             "objects_count": len(objects),
+                            "face_inference_ms": round(face_ms, 2),
+                            "person_detection_ms": round(detect_ms, 2),
+                            "tracking_emit_ms": round(
+                                (time.perf_counter() - track_start) * 1000.0,
+                                2,
+                            ),
+                            "processing_elapsed_ms": round(
+                                (time.perf_counter() - perf_start) * 1000.0,
+                                2,
+                            ),
                             "secondary_detections_count": len(secondary_people)
                             if secondary_people is not None
                             else None,
@@ -671,6 +842,12 @@ class PerceptionManager:
                 "perception.process_failed room_id=%s camera_id=%s",
                 state.room_id,
                 state.camera_id,
+            )
+            self._emit_frame_skipped(
+                state,
+                "process_exception",
+                confidence=0.2,
+                extra={"error": str(exc)},
             )
         finally:
             self._update_processing_stats(state, start, success, error)
@@ -724,16 +901,37 @@ class PerceptionManager:
                 state.last_error = None
             else:
                 state.last_error = error
+            processing_ms = state.last_processing_ms
+        if processing_ms >= 1500.0:
+            logger.warning(
+                "perception.slow_camera room_id=%s camera_id=%s processing_ms=%.1f success=%s error=%s",
+                state.room_id,
+                state.camera_id,
+                processing_ms,
+                success,
+                error,
+            )
 
-    def _detect_people(self, frame: "cv2.typing.MatLike") -> List[Detection]:
+    def _detect_people(
+        self,
+        frame: "cv2.typing.MatLike",
+        yolo_detections: Optional[List[YoloDetection]] = None,
+    ) -> List[Detection]:
         detector = self.yolo_detector
         if detector is not None and detector.ready():
-            return self._detect_people_yolo(frame)
+            return self._detect_people_yolo(frame, yolo_detections=yolo_detections)
         return self._detect_people_hog(frame)
 
-    def _detect_people_yolo(self, frame: "cv2.typing.MatLike") -> List[Detection]:
+    def _detect_people_yolo(
+        self,
+        frame: "cv2.typing.MatLike",
+        yolo_detections: Optional[List[YoloDetection]] = None,
+    ) -> List[Detection]:
         detections: List[Detection] = []
-        for det in self.yolo_detector.detect(frame):
+        raw_detections = (
+            yolo_detections if yolo_detections is not None else self.yolo_detector.detect(frame)
+        )
+        for det in raw_detections:
             if det.label:  # defensive
                 if det.label == "person":
                     detections.append(Detection(det.bbox, det.confidence))
@@ -788,6 +986,7 @@ class PerceptionManager:
             else:
                 self._resolver.refresh(track.global_id, track.appearance)
             self._update_identity(state, track, faces)
+            self._update_role(state, track, frame)
             self._emit(
                 _event(
                     state,
@@ -799,11 +998,10 @@ class PerceptionManager:
                         "bbox": detection.bbox,
                         "person_id": self._person_id_for_track(track),
                         "person_name": track.identity_name,
-                        "person_role": track.identity_role,
+                        "person_role": self._role_for_track(track),
                     },
                 )
             , frame=frame)
-            self._update_role(state, track, frame)
             self._update_body_movement(state, track, detection, frame)
             self._update_orientation(state, track)
             self._update_posture_state(state, track, frame)
@@ -827,6 +1025,7 @@ class PerceptionManager:
             track.global_id = self._resolver.assign(state.camera_id, track.appearance)
             self._update_identity(state, track, faces)
             tracks[track_id] = track
+            self._update_role(state, track, frame)
             self._emit(
                 _event(
                     state,
@@ -838,11 +1037,10 @@ class PerceptionManager:
                         "bbox": detection.bbox,
                         "person_id": self._person_id_for_track(track),
                         "person_name": track.identity_name,
-                        "person_role": track.identity_role,
+                        "person_role": self._role_for_track(track),
                     },
                 )
             , frame=frame)
-            self._update_role(state, track, frame)
             self._update_orientation(state, track)
             self._update_posture_state(state, track, frame)
 
@@ -863,78 +1061,378 @@ class PerceptionManager:
                         "track_id": track.track_id,
                         "person_id": self._person_id_for_track(track),
                         "person_name": track.identity_name,
-                        "person_role": track.identity_role,
+                        "person_role": self._role_for_track(track),
                     },
                 )
             )
 
     def _update_role(self, state: CameraPerceptionState, track: TrackState, frame: "cv2.typing.MatLike") -> None:
-        if track.identity_role in ("teacher", "student"):
-            if track.identity_role != track.role or track.identity_score > track.role_confidence:
-                track.role = track.identity_role
-                track.role_confidence = min(1.0, max(0.7, track.identity_score))
-                self._emit(
-                    _event(
-                        state,
-                        "role_assigned",
-                        track.role_confidence,
-                        track.global_id,
-                        {
-                            "track_id": track.track_id,
-                            "role": track.role,
-                            "person_id": self._person_id_for_track(track),
-                            "person_name": track.identity_name,
-                            "person_role": track.identity_role,
-                        },
-                    )
-                , frame=frame)
-            return
-        if track.role == "student" and track.role_confidence >= 0.7:
-            return
-        uniform_ratio = _uniform_ratio(frame, track.bbox, self.uniform_hsv_low, self.uniform_hsv_high)
-        if uniform_ratio >= self.uniform_min_ratio:
-            track.role = "student"
-            track.role_confidence = min(1.0, 0.7 + uniform_ratio)
-            self._emit(
-                _event(
-                    state,
-                    "role_assigned",
-                    track.role_confidence,
-                    track.global_id,
-                    {
-                        "track_id": track.track_id,
-                        "role": track.role,
-                        "person_id": self._person_id_for_track(track),
-                        "person_name": track.identity_name,
-                        "person_role": track.identity_role,
-                    },
+        student_top_ratio, student_bottom_ratio = self._student_uniform_ratios(
+            frame,
+            track.bbox,
+        )
+        x1, y1, x2, y2 = track.bbox
+        frame_height = (
+            max(1, int(frame.shape[0]))
+            if hasattr(frame, "shape") and len(frame.shape) >= 2
+            else max(1, self.detection_height)
+        )
+        frame_width = (
+            max(1, int(frame.shape[1]))
+            if hasattr(frame, "shape") and len(frame.shape) >= 2
+            else max(1, self.detection_width)
+        )
+        bbox_height = max(1, y2 - y1)
+        bbox_width = max(1, x2 - x1)
+        height_ratio = bbox_height / float(frame_height)
+        bbox_aspect_ratio = bbox_height / float(bbox_width)
+        frame_diag = max(1.0, math.hypot(frame_width, frame_height))
+        motion_strength = self._track_motion_strength(track, frame_diag)
+
+        height_ratios: List[float] = []
+        for candidate in state.tracks.values():
+            _cx1, cy1, _cx2, cy2 = candidate.bbox
+            candidate_height = max(1, cy2 - cy1)
+            height_ratios.append(candidate_height / float(frame_height))
+        if height_ratios:
+            ordered = sorted(height_ratios)
+            mid = len(ordered) // 2
+            if len(ordered) % 2 == 1:
+                median_height_ratio = ordered[mid]
+            else:
+                median_height_ratio = (ordered[mid - 1] + ordered[mid]) / 2.0
+        else:
+            median_height_ratio = height_ratio
+        relative_tallness = height_ratio / max(0.01, median_height_ratio)
+
+        has_student_top = student_top_ratio >= self.student_top_min_ratio
+        has_student_bottom = student_bottom_ratio >= self.student_bottom_min_ratio
+        student_full_uniform = has_student_top and has_student_bottom
+
+        top_only_candidate = (
+            student_top_ratio >= self.student_top_only_min_ratio
+            and student_bottom_ratio <= self.student_top_only_max_bottom_ratio
+        )
+        seated_top_only_student = (
+            top_only_candidate
+            and height_ratio <= self.student_seated_max_height_ratio
+        )
+
+        student_score = 0.0
+        student_reason = ""
+        if student_full_uniform:
+            top_strength = min(
+                1.0, student_top_ratio / max(0.01, self.student_top_min_ratio)
+            )
+            bottom_strength = min(
+                1.0, student_bottom_ratio / max(0.01, self.student_bottom_min_ratio)
+            )
+            student_score = min(
+                0.95, 0.56 + (0.2 * top_strength) + (0.2 * bottom_strength)
+            )
+            student_reason = "uniform_top_bottom"
+        elif seated_top_only_student:
+            top_only_strength = min(
+                1.0, student_top_ratio / max(0.01, self.student_top_only_min_ratio)
+            )
+            seated_strength = min(
+                1.0,
+                max(
+                    0.0,
+                    (self.student_seated_max_height_ratio - height_ratio)
+                    / max(0.01, self.student_seated_max_height_ratio),
+                ),
+            )
+            student_score = min(
+                0.88,
+                0.5 + (0.24 * top_only_strength) + (0.1 * seated_strength),
+            )
+            student_reason = "uniform_top_only_seated"
+        if student_score > 0.0:
+            stillness_strength = max(0.0, 1.0 - motion_strength)
+            if seated_top_only_student:
+                student_score = min(0.95, student_score + (0.08 * stillness_strength))
+            elif student_full_uniform and height_ratio <= self.student_seated_max_height_ratio * 1.12:
+                student_score = min(0.95, student_score + (0.05 * stillness_strength))
+
+        top_deficit = max(
+            0.0,
+            (self.student_top_min_ratio - student_top_ratio)
+            / max(0.01, self.student_top_min_ratio),
+        )
+        bottom_deficit = max(
+            0.0,
+            (self.student_bottom_min_ratio - student_bottom_ratio)
+            / max(0.01, self.student_bottom_min_ratio),
+        )
+        non_uniform_strength = min(1.0, (0.35 * top_deficit) + (0.65 * bottom_deficit))
+        white_top_without_red = has_student_top and not has_student_bottom
+        standing_candidate = (
+            height_ratio >= self.teacher_height_ratio
+            or (
+                track.hits >= self.teacher_min_hits
+                and relative_tallness >= 1.28
+                and height_ratio >= max(0.12, self.student_seated_max_height_ratio * 0.55)
+            )
+        )
+
+        teacher_candidate = (
+            track.hits >= self.teacher_min_hits
+            and not seated_top_only_student
+            and (
+                (white_top_without_red and standing_candidate)
+                or non_uniform_strength >= 0.25
+                or (standing_candidate and relative_tallness >= 1.25)
+            )
+        )
+        teacher_score = 0.0
+        teacher_reason = "non_uniform_profile"
+        if teacher_candidate:
+            absolute_height_strength = min(
+                1.0, height_ratio / max(0.01, self.teacher_height_ratio)
+            )
+            relative_height_strength = min(
+                1.0, max(0.0, (relative_tallness - 1.0) / 0.6)
+            )
+            height_strength = max(absolute_height_strength, relative_height_strength)
+            mobility_bonus = (
+                0.12 * motion_strength if standing_candidate else 0.06 * motion_strength
+            )
+            if white_top_without_red and standing_candidate:
+                teacher_reason = "white_top_standing"
+                teacher_score = min(
+                    0.94,
+                    0.56
+                    + (0.14 * height_strength)
+                    + (0.16 * min(1.0, bottom_deficit))
+                    + mobility_bonus,
                 )
-            , frame=frame)
+            else:
+                teacher_score = min(
+                    0.93,
+                    0.5
+                    + (0.28 * non_uniform_strength)
+                    + (0.1 * height_strength)
+                    + mobility_bonus,
+                )
+            if relative_tallness >= 1.35:
+                if teacher_reason == "non_uniform_profile":
+                    teacher_reason = "tall_non_uniform_profile"
+                teacher_score = min(
+                    0.95,
+                    teacher_score
+                    + (
+                        0.04
+                        * min(1.0, max(0.0, (relative_tallness - 1.35) / 0.35))
+                    ),
+                )
+
+        very_tall_teacher_candidate = (
+            track.hits >= self.teacher_min_hits
+            and not seated_top_only_student
+            and relative_tallness >= 1.45
+            and height_ratio >= max(0.15, self.student_seated_max_height_ratio * 0.65)
+        )
+        if very_tall_teacher_candidate:
+            tallness_boost = min(
+                1.0,
+                max(0.0, (relative_tallness - 1.45) / 1.0),
+            )
+            motion_boost = min(1.0, motion_strength / 0.25)
+            teacher_score = min(
+                0.97,
+                max(teacher_score, 0.64 + (0.2 * tallness_boost) + (0.12 * motion_boost)),
+            )
+            if teacher_reason in ("non_uniform_profile", "tall_non_uniform_profile"):
+                teacher_reason = "very_tall_active_candidate"
+            if student_full_uniform and motion_strength >= 0.08:
+                student_score = max(0.0, student_score - (0.12 + (0.06 * tallness_boost)))
+
+        identity_role = (
+            track.identity_role.strip().lower()
+            if isinstance(track.identity_role, str)
+            else ""
+        )
+        identity_bias = 0.0
+        if identity_role in ("teacher", "student"):
+            identity_strength = min(1.0, max(0.0, track.identity_score))
+            identity_bias = 0.72 + (0.24 * identity_strength)
+            if identity_role == "teacher":
+                teacher_score = max(teacher_score, identity_bias)
+                if teacher_score >= student_score:
+                    teacher_reason = "identity_teacher"
+            else:
+                student_score = max(student_score, identity_bias)
+                if student_score >= teacher_score:
+                    student_reason = "identity_student"
+
+        evidence_decay = 0.84
+        track.role_student_evidence = min(
+            6.0, (track.role_student_evidence * evidence_decay) + student_score
+        )
+        track.role_teacher_evidence = min(
+            6.0, (track.role_teacher_evidence * evidence_decay) + teacher_score
+        )
+        evidence_total = track.role_student_evidence + track.role_teacher_evidence
+        if evidence_total > 0.0:
+            student_temporal = track.role_student_evidence / evidence_total
+            teacher_temporal = track.role_teacher_evidence / evidence_total
+        else:
+            student_temporal = 0.0
+            teacher_temporal = 0.0
+
+        raw_student_score = student_score
+        raw_teacher_score = teacher_score
+        student_score = (0.64 * student_score) + (0.36 * student_temporal)
+        teacher_score = (0.64 * teacher_score) + (0.36 * teacher_temporal)
+
+        margin = self.role_decision_margin
+        role_metrics = {
+            "student_top_ratio": round(student_top_ratio, 3),
+            "student_bottom_ratio": round(student_bottom_ratio, 3),
+            "student_top_deficit": round(top_deficit, 3),
+            "student_bottom_deficit": round(bottom_deficit, 3),
+            "height_ratio": round(height_ratio, 3),
+            "bbox_aspect_ratio": round(bbox_aspect_ratio, 3),
+            "relative_tallness": round(relative_tallness, 3),
+            "median_height_ratio": round(median_height_ratio, 3),
+            "motion_strength": round(motion_strength, 3),
+            "student_full_uniform": student_full_uniform,
+            "seated_top_only_student": seated_top_only_student,
+            "teacher_standing_candidate": standing_candidate,
+            "identity_role": identity_role if identity_role else None,
+            "identity_bias": round(identity_bias, 3),
+            "raw_student_score": round(raw_student_score, 3),
+            "raw_teacher_score": round(raw_teacher_score, 3),
+            "student_temporal": round(student_temporal, 3),
+            "teacher_temporal": round(teacher_temporal, 3),
+            "student_evidence": round(track.role_student_evidence, 3),
+            "teacher_evidence": round(track.role_teacher_evidence, 3),
+        }
+
+        if student_score > 0.0 and student_score >= teacher_score + margin:
+            if track.role != "student":
+                switch_guard = track.role_confidence + (margin * 0.5)
+                if (
+                    student_score < switch_guard
+                    and track.role_student_evidence
+                    <= track.role_teacher_evidence * 1.08
+                ):
+                    return
+            if not student_reason:
+                if track.role_student_evidence > track.role_teacher_evidence * 1.2:
+                    student_reason = "temporal_student_consensus"
+                else:
+                    student_reason = "student_profile"
+            self._emit_role_assignment(
+                state=state,
+                track=track,
+                role="student",
+                confidence=student_score,
+                frame=frame,
+                reason=student_reason,
+                metrics=role_metrics,
+            )
             return
 
-        height = max(1, track.bbox[3] - track.bbox[1])
-        frame_height = frame.shape[0]
-        height_ratio = height / float(frame_height)
-        if height_ratio >= self.teacher_height_ratio and track.hits >= 5:
-            confidence = min(0.6, height_ratio)
-            if confidence > track.role_confidence:
-                track.role = "teacher"
-                track.role_confidence = confidence
-                self._emit(
-                    _event(
-                        state,
-                        "role_assigned",
-                        track.role_confidence,
-                        track.global_id,
-                        {
-                            "track_id": track.track_id,
-                            "role": track.role,
-                            "person_id": self._person_id_for_track(track),
-                            "person_name": track.identity_name,
-                            "person_role": track.identity_role,
-                        },
-                    )
-                , frame=frame)
+        if teacher_score > 0.0 and teacher_score >= student_score + margin:
+            if track.role != "teacher":
+                switch_guard = track.role_confidence + (margin * 0.5)
+                if (
+                    teacher_score < switch_guard
+                    and track.role_teacher_evidence
+                    <= track.role_student_evidence * 1.08
+                ):
+                    return
+            if (
+                teacher_reason == "non_uniform_profile"
+                and track.role_teacher_evidence > track.role_student_evidence * 1.2
+            ):
+                teacher_reason = "temporal_teacher_consensus"
+            self._emit_role_assignment(
+                state=state,
+                track=track,
+                role="teacher",
+                confidence=teacher_score,
+                frame=frame,
+                reason=teacher_reason,
+                metrics=role_metrics,
+            )
+
+    def _emit_role_assignment(
+        self,
+        state: CameraPerceptionState,
+        track: TrackState,
+        role: str,
+        confidence: float,
+        frame: "cv2.typing.MatLike",
+        reason: str,
+        metrics: Optional[Dict[str, object]] = None,
+    ) -> None:
+        confidence = float(max(0.0, min(1.0, confidence)))
+        if role == track.role and confidence <= track.role_confidence:
+            return
+        track.role = role
+        track.role_confidence = confidence
+        payload: Dict[str, object] = {
+            "track_id": track.track_id,
+            "role": track.role,
+            "role_reason": reason,
+            "person_id": self._person_id_for_track(track),
+            "person_name": track.identity_name,
+            "person_role": track.role,
+        }
+        if metrics:
+            payload.update(metrics)
+        self._emit(
+            _event(
+                state,
+                "role_assigned",
+                track.role_confidence,
+                track.global_id,
+                payload,
+            ),
+            frame=frame,
+        )
+
+    def _student_uniform_ratios(
+        self,
+        frame: "cv2.typing.MatLike",
+        bbox: Tuple[int, int, int, int],
+    ) -> Tuple[float, float]:
+        top_bbox = _bbox_vertical_slice(bbox, 0.0, 0.58)
+        bottom_bbox = _bbox_vertical_slice(bbox, 0.52, 1.0)
+        top_ratio = _uniform_ratio(
+            frame,
+            top_bbox,
+            self.student_top_hsv_low,
+            self.student_top_hsv_high,
+        )
+        bottom_ratio_1 = _uniform_ratio(
+            frame,
+            bottom_bbox,
+            self.student_bottom_hsv_low,
+            self.student_bottom_hsv_high,
+        )
+        bottom_ratio_2 = _uniform_ratio(
+            frame,
+            bottom_bbox,
+            self.student_bottom_hsv_low_2,
+            self.student_bottom_hsv_high_2,
+        )
+        return top_ratio, max(bottom_ratio_1, bottom_ratio_2)
+
+    @staticmethod
+    def _track_motion_strength(track: TrackState, frame_diag: float) -> float:
+        if frame_diag <= 0.0 or len(track.history) < 2:
+            return 0.0
+        points = list(track.history)
+        distance = 0.0
+        for idx in range(1, len(points)):
+            px, py = points[idx - 1]
+            cx, cy = points[idx]
+            distance += math.hypot(cx - px, cy - py)
+        return min(1.0, distance / max(1.0, frame_diag * 0.35))
 
     def _update_identity(
         self, state: CameraPerceptionState, track: TrackState, faces: List[FaceMatch]
@@ -970,7 +1468,8 @@ class PerceptionManager:
                                 "person_id": match.person_id,
                                 "previous_person_id": unknown_id,
                                 "person_name": match.name,
-                                "person_role": match.role,
+                                "person_role": self._role_for_track(track),
+                                "identity_role": match.role,
                             },
                         )
                     )
@@ -1007,7 +1506,7 @@ class PerceptionManager:
                         "orientation": orientation,
                         "person_id": self._person_id_for_track(track),
                         "person_name": track.identity_name,
-                        "person_role": track.identity_role,
+                        "person_role": self._role_for_track(track),
                     },
                 )
             )
@@ -1052,7 +1551,7 @@ class PerceptionManager:
                     "distance_pixels": distance,
                     "person_id": self._person_id_for_track(track),
                     "person_name": track.identity_name,
-                    "person_role": track.identity_role,
+                    "person_role": self._role_for_track(track),
                 },
             ),
             frame=frame,
@@ -1095,7 +1594,7 @@ class PerceptionManager:
                             "orientation": orientation,
                             "person_id": self._person_id_for_track(track),
                             "person_name": track.identity_name,
-                            "person_role": track.identity_role,
+                            "person_role": role,
                             "role": role,
                         },
                     ),
@@ -1131,13 +1630,13 @@ class PerceptionManager:
                         "posture": posture,
                         "orientation": orientation,
                         "bow_ratio": bow_ratio,
-                        "aspect_ratio": aspect_ratio,
-                        "person_id": self._person_id_for_track(track),
-                        "person_name": track.identity_name,
-                        "person_role": track.identity_role,
-                        "role": role,
-                    },
-                ),
+                            "aspect_ratio": aspect_ratio,
+                            "person_id": self._person_id_for_track(track),
+                            "person_name": track.identity_name,
+                            "person_role": role,
+                            "role": role,
+                        },
+                    ),
                 frame=frame,
             )
 
@@ -1173,16 +1672,20 @@ class PerceptionManager:
                     "sleep_duration_seconds": sleep_duration,
                     "person_id": self._person_id_for_track(track),
                     "person_name": track.identity_name,
-                    "person_role": track.identity_role,
+                    "person_role": role,
                     "role": role,
                 },
             ),
             frame=frame,
         )
 
-    def _detect_objects(self, frame: "cv2.typing.MatLike") -> List[ObjectDetection]:
+    def _detect_objects(
+        self,
+        frame: "cv2.typing.MatLike",
+        yolo_detections: Optional[List[YoloDetection]] = None,
+    ) -> List[ObjectDetection]:
         if self.yolo_detector is not None and self.yolo_detector.ready():
-            return self._detect_objects_yolo(frame)
+            return self._detect_objects_yolo(frame, yolo_detections=yolo_detections)
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         edges = cv2.Canny(gray, 50, 150)
         contours, _hier = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -1212,12 +1715,19 @@ class PerceptionManager:
             detections.append(obj)
         return detections
 
-    def _detect_objects_yolo(self, frame: "cv2.typing.MatLike") -> List[ObjectDetection]:
+    def _detect_objects_yolo(
+        self,
+        frame: "cv2.typing.MatLike",
+        yolo_detections: Optional[List[YoloDetection]] = None,
+    ) -> List[ObjectDetection]:
         detector = self.yolo_detector
         if detector is None:
             return []
         detections: List[ObjectDetection] = []
-        for det in detector.detect(frame):
+        raw_detections = (
+            yolo_detections if yolo_detections is not None else detector.detect(frame)
+        )
+        for det in raw_detections:
             obj = self._map_yolo_label(det)
             if obj is None:
                 continue
@@ -1237,8 +1747,9 @@ class PerceptionManager:
             category = mapped.get("category", "other")
             risk_level = mapped.get("risk_level", "low")
             if isinstance(object_type, str) and object_type.strip():
+                object_type_value = object_type.strip().lower()
                 return ObjectDetection(
-                    object_type=object_type.strip(),
+                    object_type=object_type_value,
                     category=category if isinstance(category, str) else "other",
                     risk_level=risk_level if isinstance(risk_level, str) else "low",
                     confidence=det.confidence,
@@ -1341,9 +1852,7 @@ class PerceptionManager:
         tracks = state.object_tracks
         matches = _match_object_detections(detections, list(tracks.values()), self.object_iou_threshold)
 
-        matched_track_ids = set()
         matched_detection_ids = set()
-        detection_track_ids: Dict[int, int] = {}
 
         for det_idx, track_id in matches.items():
             detection = detections[det_idx]
@@ -1351,9 +1860,7 @@ class PerceptionManager:
             track.detection = detection
             track.last_seen = now
             track.hits += 1
-            matched_track_ids.add(track_id)
             matched_detection_ids.add(det_idx)
-            detection_track_ids[det_idx] = track_id
 
         for idx, detection in enumerate(detections):
             if idx in matched_detection_ids:
@@ -1367,7 +1874,6 @@ class PerceptionManager:
                 hits=1,
             )
             tracks[track_id] = track
-            detection_track_ids[idx] = track_id
 
         expired = [
             track_id
@@ -1377,8 +1883,12 @@ class PerceptionManager:
         for track_id in expired:
             tracks.pop(track_id, None)
 
-        for det_idx, detection in enumerate(detections):
-            detection = self._apply_object_flags(detection)
+        for track in tracks.values():
+            if not track.emitted and track.hits < self.object_persist_frames:
+                continue
+            detection = self._apply_object_flags(track.detection)
+            object_type = _object_key(detection.object_type)
+            track.emitted = True
             self._emit(
                 _event(
                     state,
@@ -1390,9 +1900,9 @@ class PerceptionManager:
                         "category": detection.category,
                         "risk_level": detection.risk_level,
                         "bbox": detection.bbox,
-                        "object_track_id": detection_track_ids.get(det_idx),
-                        "priority": detection.object_type in self.object_priority,
-                        "risky": detection.object_type in self.object_risky,
+                        "object_track_id": track.track_id,
+                        "priority": object_type in self.object_priority,
+                        "risky": object_type in self.object_risky,
                     },
                 )
             , frame=frame)
@@ -1415,6 +1925,7 @@ class PerceptionManager:
             if best_track is None:
                 continue
             detection = self._apply_object_flags(obj_track.detection)
+            object_type = _object_key(detection.object_type)
             self._emit(
                 _event(
                     state,
@@ -1428,11 +1939,11 @@ class PerceptionManager:
                         "category": detection.category,
                         "risk_level": detection.risk_level,
                         "bbox": detection.bbox,
-                        "priority": detection.object_type in self.object_priority,
-                        "risky": detection.object_type in self.object_risky,
+                        "priority": object_type in self.object_priority,
+                        "risky": object_type in self.object_risky,
                         "person_id": self._person_id_for_track(best_track),
                         "person_name": best_track.identity_name,
-                        "person_role": best_track.identity_role,
+                        "person_role": self._role_for_track(best_track),
                     },
                 )
             , frame=frame)
@@ -1467,8 +1978,6 @@ class PerceptionManager:
 
     @staticmethod
     def _role_for_track(track: TrackState) -> str:
-        if isinstance(track.identity_role, str) and track.identity_role:
-            return track.identity_role
         return track.role
 
     def _maybe_emit_device_usage(
@@ -1499,7 +2008,7 @@ class PerceptionManager:
                         "bbox": detection.bbox,
                         "person_id": person_id,
                         "person_name": track.identity_name,
-                        "person_role": track.identity_role,
+                        "person_role": role,
                         "role": role,
                     },
                 ),
@@ -1530,7 +2039,7 @@ class PerceptionManager:
                     "bbox": detection.bbox,
                     "person_id": person_id,
                     "person_name": track.identity_name,
-                    "person_role": track.identity_role,
+                    "person_role": role,
                     "role": role,
                 },
             ),
@@ -1677,10 +2186,16 @@ class PerceptionManager:
                 state.group_state.pop(key, None)
 
     def _object_allowed(self, object_type: str) -> bool:
-        return True
+        key = _object_key(object_type)
+        if not key:
+            return False
+        if not self.object_allowlist:
+            return True
+        return key in self.object_allowlist
 
     def _apply_object_flags(self, detection: ObjectDetection) -> ObjectDetection:
-        if detection.object_type in self.object_risky and detection.risk_level != "high":
+        object_type = _object_key(detection.object_type)
+        if object_type in self.object_risky and detection.risk_level != "high":
             detection = ObjectDetection(
                 object_type=detection.object_type,
                 category=detection.category,
@@ -1751,6 +2266,30 @@ def _unique_values(values) -> List[object]:
     return output
 
 
+def _bbox_vertical_slice(
+    bbox: Tuple[int, int, int, int],
+    start_ratio: float,
+    end_ratio: float,
+) -> Tuple[int, int, int, int]:
+    x1, y1, x2, y2 = bbox
+    if y2 <= y1:
+        return bbox
+    start = max(0.0, min(1.0, start_ratio))
+    end = max(start, min(1.0, end_ratio))
+    height = y2 - y1
+    ys = y1 + int(height * start)
+    ye = y1 + int(height * end)
+    ys = max(y1, min(y2 - 1, ys))
+    ye = max(ys + 1, min(y2, ye))
+    return (x1, ys, x2, ye)
+
+
+def _object_key(value: object) -> str:
+    if not isinstance(value, str):
+        return ""
+    return value.strip().lower()
+
+
 def _bbox_iou(a: Tuple[int, int, int, int], b: Tuple[int, int, int, int]) -> float:
     ax1, ay1, ax2, ay2 = a
     bx1, by1, bx2, by2 = b
@@ -1801,8 +2340,11 @@ def _match_object_detections(
     for det_idx, det in enumerate(detections):
         best_iou = 0.0
         best_track = None
+        det_type = _object_key(det.object_type)
         for track in tracks:
             if track.track_id in used_tracks:
+                continue
+            if _object_key(track.detection.object_type) != det_type:
                 continue
             iou = _bbox_iou(det.bbox, track.detection.bbox)
             if iou > best_iou:
