@@ -436,7 +436,7 @@ class Settings:
             "PERCEPTION_ORIENTATION_MOTION_THRESHOLD", 10.0
         )
         self.perception_body_movement_enabled = _get_bool(
-            "PERCEPTION_BODY_MOVEMENT_ENABLED", False
+            "PERCEPTION_BODY_MOVEMENT_ENABLED", True
         )
         self.perception_body_movement_min_delta_pixels = _get_float(
             "PERCEPTION_BODY_MOVEMENT_MIN_DELTA_PIXELS", 1.0
